@@ -92,6 +92,10 @@ LANG = {
         'alert_warning'       : "🟡 WARNING",
         'alert_ok'            : "🟢 OK",
         'alert_na'            : "❓ N/A",
+        # Tm threshold descriptions / Descriptions des seuils Tm
+        'tm_thresh_ok'        : "Tm < 0°C",
+        'tm_thresh_warn'      : "20°C ≤ Tm ≤ 40°C",
+        'tm_thresh_crit'      : "Tm > 50°C",
 
         # Result types / Types de résultats
         'type_hairpin'        : "Hairpin",
@@ -115,7 +119,7 @@ LANG = {
         'txt_title'           : "Thermodynamic Analysis of Primers",
         'txt_source'          : "Source file",
         'txt_generated'       : "Generated on",
-        'txt_summary_header'  : "📊 SUMMARY TABLE (sorted by ascending dG)",
+        'txt_summary_header'  : "📊 SUMMARY TABLE (sorted by descending Tm)",
         'txt_col_pair'        : "Pair",
         'txt_col_type'        : "Type",
         'txt_col_dg'          : "dG (cal/mol)",
@@ -146,11 +150,11 @@ LANG = {
         'html_h1'             : "🧬 Thermodynamic Analysis of Primers",
         'html_source'         : "Source file",
         'html_generated'      : "Generated on",
-        'html_legend_ok'      : "🟢 OK (dG >",
-        'html_legend_warn'    : "🟡 WARNING",
-        'html_legend_crit'    : "🔴 PROBLEM (dG ≤",
-        'html_legend_lt'      : "kcal/mol)",
-        'html_legend_between' : "kcal/mol < dG ≤",
+        'html_legend_ok'      : "🟢 OK — Tm < 0°C",
+        'html_legend_warn'    : "🟡 WARNING — 20°C ≤ Tm ≤ 40°C",
+        'html_legend_crit'    : "🔴 PROBLEM — Tm > 50°C",
+        'html_legend_lt'      : "",
+        'html_legend_between' : "",
         'html_stat_total'     : "Total analyses",
         'html_stat_crit'      : "Critical problems",
         'html_stat_warn'      : "Warnings",
@@ -210,6 +214,10 @@ LANG = {
         'alert_warning'       : "🟡 ATTENTION",
         'alert_ok'            : "🟢 OK",
         'alert_na'            : "❓ N/A",
+        # Tm threshold descriptions / Descriptions des seuils Tm
+        'tm_thresh_ok'        : "Tm < 0°C",
+        'tm_thresh_warn'      : "20°C ≤ Tm ≤ 40°C",
+        'tm_thresh_crit'      : "Tm > 50°C",
 
         # Result types / Types de résultats
         'type_hairpin'        : "Hairpin",
@@ -233,7 +241,7 @@ LANG = {
         'txt_title'           : "Analyse thermodynamique des primers",
         'txt_source'          : "Fichier source",
         'txt_generated'       : "Généré le",
-        'txt_summary_header'  : "📊 TABLEAU RÉCAPITULATIF (trié par dG croissant)",
+        'txt_summary_header'  : "📊 TABLEAU RÉCAPITULATIF (trié par Tm décroissant)",
         'txt_col_pair'        : "Paire",
         'txt_col_type'        : "Type",
         'txt_col_dg'          : "dG (cal/mol)",
@@ -264,11 +272,11 @@ LANG = {
         'html_h1'             : "🧬 Analyse Thermodynamique des Primers",
         'html_source'         : "Fichier source",
         'html_generated'      : "Généré le",
-        'html_legend_ok'      : "🟢 OK (dG >",
-        'html_legend_warn'    : "🟡 ATTENTION",
-        'html_legend_crit'    : "🔴 PROBLÈME (dG ≤",
-        'html_legend_lt'      : "kcal/mol)",
-        'html_legend_between' : "kcal/mol < dG ≤",
+        'html_legend_ok'      : "🟢 OK — Tm < 0°C",
+        'html_legend_warn'    : "🟡 ATTENTION — 20°C ≤ Tm ≤ 40°C",
+        'html_legend_crit'    : "🔴 PROBLÈME — Tm > 50°C",
+        'html_legend_lt'      : "",
+        'html_legend_between' : "",
         'html_stat_total'     : "Analyses totales",
         'html_stat_crit'      : "Problèmes critiques",
         'html_stat_warn'      : "Avertissements",
@@ -293,10 +301,15 @@ LANG = {
 # Caractères IUPAC valides pour une séquence d'acide nucléique
 VALID_BASES = set("ATGCNRYSWKMBDHVatgcnryswkmbdhv")
 
-# Thermodynamic alert thresholds (kcal/mol)
-# Seuils d'alerte thermodynamique (kcal/mol)
-DG_CRITICAL = -6.0   # Severe problem / Problème sévère
-DG_WARNING  = -3.0   # Warning / Attention
+# Thermodynamic alert thresholds based on melting temperature Tm (°C)
+# Seuils d'alerte thermodynamique basés sur la température de fusion Tm (°C)
+# Tm < 0      → OK      (structure trop instable pour être problématique)
+# 20 ≤ Tm ≤ 40 → WARNING (structure modérément stable, à surveiller)
+# Tm > 50     → PROBLEM  (structure très stable, risque d'inhibition)
+TM_OK_MAX      =  0.0   # Below this Tm → OK / En dessous → OK
+TM_WARNING_MIN = 20.0   # Start of warning zone / Début zone attention
+TM_WARNING_MAX = 40.0   # End of warning zone / Fin zone attention
+TM_CRITICAL    = 50.0   # Above this Tm → PROBLEM / Au-dessus → PROBLÈME
 
 # =============================================================================
 # UTILITY FUNCTIONS / FONCTIONS UTILITAIRES
@@ -375,18 +388,25 @@ def validate_sequences(primers: dict) -> list:
     return errors
 
 
-def get_alert_label(dg_str: str, T: dict) -> str:
+def get_alert_label(tm_str: str, T: dict) -> str:
     """
-    Returns a localized alert label based on the dG value.
-    Retourne un label d'alerte localisé selon la valeur de dG.
+    Returns a localized alert label based on the Tm value (melting temperature in °C).
+    Retourne un label d'alerte localisé selon la valeur de Tm (température de fusion en °C).
+
+    Classification:
+        Tm < 0°C         → OK      (structure trop instable / too unstable)
+        20°C ≤ Tm ≤ 40°C → WARNING (structure modérément stable / moderately stable)
+        Tm > 50°C        → PROBLEM  (structure très stable / very stable, inhibition risk)
+        0°C ≤ Tm < 20°C  → OK      (zone intermédiaire basse / low intermediate zone)
+        40°C < Tm ≤ 50°C → WARNING (zone intermédiaire haute / high intermediate zone)
     """
     try:
-        dg = float(dg_str)
+        tm = float(tm_str)
     except (ValueError, TypeError):
         return T['alert_na']
-    if dg <= DG_CRITICAL:
+    if tm > TM_CRITICAL:
         return T['alert_critical']
-    elif dg <= DG_WARNING:
+    elif tm >= TM_WARNING_MIN:
         return T['alert_warning']
     return T['alert_ok']
 
@@ -455,6 +475,7 @@ def analyze_dimer(seq1: str, seq2: str, name1: str, name2: str,
             structure.append(line.rstrip())
 
     dg_val = dimer_info.get('dG', 'N/A')
+    tm_val = dimer_info.get('Tm', 'N/A')
 
     # Determine type label / Déterminer le label de type
     if mode == 'HAIRPIN':
@@ -474,8 +495,9 @@ def analyze_dimer(seq1: str, seq2: str, name1: str, name2: str,
         'dH'       : dimer_info.get('dH', 'N/A'),
         'dS'       : dimer_info.get('dS', 'N/A'),
         'dG'       : dg_val,
-        'Tm'       : dimer_info.get('Tm', 'N/A'),
-        'alert'    : get_alert_label(dg_val, T),
+        'Tm'       : tm_val,
+        # Alert is now based on Tm / L'alerte est maintenant basée sur la Tm
+        'alert'    : get_alert_label(tm_val, T),
         'structure': '\n'.join(structure) if structure else 'N/A',
     }
 
@@ -514,13 +536,13 @@ def write_text_report(hairpin_results: list, dimer_results: list,
     """
     all_results = hairpin_results + dimer_results
 
-    # Sort by ascending dG / Trier par dG croissant
+    # Sort by descending Tm (most critical first) / Trier par Tm décroissant (les plus critiques en premier)
     def sort_key(r):
         try:
-            return float(r['dG'])
+            return float(r['Tm'])
         except (ValueError, TypeError):
-            return 0.0
-    sorted_results = sorted(all_results, key=sort_key)
+            return -999.0
+    sorted_results = sorted(all_results, key=sort_key, reverse=True)
 
     with open(output_file, "w", encoding='utf-8') as f:
         f.write(f"{T['txt_title']} ({T['txt_source']}: {fasta_name})\n")
@@ -600,22 +622,22 @@ def write_html_report(hairpin_results: list, dimer_results: list,
     """
     all_results = hairpin_results + dimer_results
 
-    def dg_class(dg_str):
-        # CSS class based on alert level / Classe CSS selon le niveau d'alerte
+    def tm_class(tm_str):
+        # CSS class based on Tm alert level / Classe CSS selon le niveau d'alerte Tm
         try:
-            dg = float(dg_str)
+            tm = float(tm_str)
         except (ValueError, TypeError):
             return "na"
-        if dg <= DG_CRITICAL:
+        if tm > TM_CRITICAL:
             return "critical"
-        elif dg <= DG_WARNING:
+        elif tm >= TM_WARNING_MIN:
             return "warning"
         return "ok"
 
     def make_rows(results):
         html = ""
         for r in results:
-            cls = dg_class(r['dG'])
+            cls = tm_class(r['Tm'])
             # Escape < > in structure / Échapper les < > dans la structure
             struct = r['structure'].replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
             html += f"""
@@ -647,9 +669,10 @@ def write_html_report(hairpin_results: list, dimer_results: list,
     h1    = T['html_h1']
     src   = T['html_source']
     gen   = T['html_generated']
-    leg_ok   = f"{T['html_legend_ok']} {DG_WARNING} {T['html_legend_lt']}"
-    leg_warn = f"{T['html_legend_warn']} ({DG_CRITICAL} {T['html_legend_between']} {DG_WARNING} {T['html_legend_lt']})"
-    leg_crit = f"{T['html_legend_crit']} {DG_CRITICAL} {T['html_legend_lt']}"
+    # Legend now shows Tm thresholds / La légende affiche maintenant les seuils Tm
+    leg_ok   = T['html_legend_ok']
+    leg_warn = T['html_legend_warn']
+    leg_crit = T['html_legend_crit']
 
     html = f"""<!DOCTYPE html>
 <html lang="{hl}">
