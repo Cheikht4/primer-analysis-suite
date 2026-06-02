@@ -1,0 +1,16 @@
+# Fichiers de données et résultats
+*.fasta
+*.txt
+*.csv
+*.html
+*.log
+
+# Exceptions (fichiers à conserver)
+!README*.txt
+!requirements.txt
+!primer_*.txt
+
+# Python et macOS
+__pycache__/
+*.pyc
+.DS_Store
