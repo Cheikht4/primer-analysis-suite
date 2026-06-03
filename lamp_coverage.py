@@ -129,7 +129,10 @@ def load_primers(filepath, is_pcr=False):
                     seq = record['seq'].upper()
                     
                 if '_' in name:
-                    parts = name.split('_', 1)
+                    # Découpage sur le DERNIER underscore pour associer les amorces entre elles
+                    # Split on the LAST underscore to group primers by set
+                    # Ex: "SetA_Dengue2_F3" → set_id="SetA_Dengue2", primer_id="F3"
+                    parts = name.rsplit('_', 1)
                     set_id = parts[0]
                     primer_id = parts[1]
                 else:
