@@ -8,6 +8,23 @@ from collections import defaultdict
 from Bio import SeqIO
 from Bio.Seq import Seq
 
+# Import optionnel de tqdm pour les barres de progression / Optional tqdm import for progress bars
+try:
+    from tqdm import tqdm
+except ImportError:
+    # Fallback si tqdm n'est pas installé / Fallback if tqdm is not installed
+    def tqdm(iterable=None, **kwargs):
+        desc = kwargs.get('desc', '')
+        if desc and iterable is None:
+            class _DummyBar:
+                def update(self, n=1): pass
+                def set_postfix_str(self, s): pass
+                def close(self): pass
+            return _DummyBar()
+        if desc:
+            print(f"{desc}...")
+        return iterable if iterable is not None else []
+
 # Dictionnaire IUPAC vers expression régulière
 IUPAC_DICT = {
     'A': 'A', 'C': 'C', 'G': 'G', 'T': 'T', 'U': 'T',
@@ -344,14 +361,21 @@ def main():
     print(txt['target_load'])
     targets = {}
     try:
-        for record in SeqIO.parse(args.target, "fasta"):
+        # Chargement avec barre de progression / Loading with progress bar
+        all_records = list(tqdm(
+            SeqIO.parse(args.target, "fasta"),
+            desc="📂 Chargement / Loading" if args.lng == 'fr' else "📂 Loading sequences",
+            unit=" seq",
+            colour="cyan"
+        ))
+        for record in all_records:
             clean_seq = str(record.seq).upper().replace('-', '')
             if len(clean_seq) > 100:
                 targets[record.description] = clean_seq
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)
-        
+
     total_targets = len(targets)
     if total_targets == 0:
         print(txt['target_err'])
@@ -373,22 +397,25 @@ def main():
     
     primer_matches = defaultdict(lambda: defaultdict(set))
     primer_positions = defaultdict(lambda: defaultdict(dict))
-    
+
+    # Boucle principale d'analyse avec barre de progression tqdm
+    # Main analysis loop with tqdm progress bar
     total_steps = len(primer_sets) * len(targets)
-    current_step = 0
-    
-    for set_id, primers in primer_sets.items():
-        for seq_id, seq in targets.items():
-            for primer_id, primer_seq in primers.items():
-                pos = primer_matches_sequence(seq, primer_seq, args.errors, args.strict_3prime)
-                if pos:
-                    primer_matches[set_id][primer_id].add(seq_id)
-                    primer_positions[set_id][seq_id][primer_id] = pos
-            
-            current_step += 1
-            if current_step % max(1, (total_steps // 10)) == 0:
-                print(txt['progression'].format(int(current_step/total_steps*100)))
-                
+    bar_label = "🔬 Analyse" if args.lng == 'fr' else "🔬 Analysing"
+
+    with tqdm(total=total_steps, desc=bar_label, unit=" seq", colour="green") as pbar:
+        for set_id, primers in primer_sets.items():
+            for seq_id, seq in targets.items():
+                for primer_id, primer_seq in primers.items():
+                    pos = primer_matches_sequence(seq, primer_seq, args.errors, args.strict_3prime)
+                    if pos:
+                        primer_matches[set_id][primer_id].add(seq_id)
+                        primer_positions[set_id][seq_id][primer_id] = pos
+
+                pbar.update(1)
+                # Affiche le set en cours dans la barre / Show current set in bar
+                pbar.set_postfix_str(f"Set {set_id}")
+
     print(txt['report_gen'])
     
     if args.pcr:

@@ -7,6 +7,17 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
+# Import optionnel de tqdm pour les barres de progression / Optional tqdm import for progress bars
+try:
+    from tqdm import tqdm
+except ImportError:
+    # Fallback si tqdm n'est pas installé / Fallback if tqdm is not installed
+    def tqdm(iterable, **kwargs):
+        desc = kwargs.get('desc', '')
+        if desc:
+            print(f"{desc}...")
+        return iterable
+
 # Dictionnaire IUPAC vers expression régulière
 # IUPAC dictionary to regular expression / Dictionnaire IUPAC vers expression régulière
 IUPAC_DICT = {
@@ -337,9 +348,14 @@ def main():
 
     args = parser.parse_args()
 
-    # Chargement de la séquence cible / Load target sequences
+    # Chargement de la séquence cible avec barre de progression / Load target with progress bar
     try:
-        targets = list(SeqIO.parse(args.target, "fasta"))
+        targets = list(tqdm(
+            SeqIO.parse(args.target, "fasta"),
+            desc="📂 Chargement séquences / Loading sequences",
+            unit=" seq",
+            colour="cyan"
+        ))
     except Exception as e:
         print(f"Erreur lors de la lecture du fichier cible : {e}")
         sys.exit(1)
@@ -404,11 +420,17 @@ def main():
         print()
 
     # ─────────────────────────────────────────────────────
-    # Alignement de chaque amorce / Align each primer
+    # Alignement de chaque amorce avec barre de progression
+    # Align each primer with a progress bar
     # ─────────────────────────────────────────────────────
     out_records = list(targets)  # Toutes les séquences cibles en premier / All target seqs first
 
-    for primer_id, primer_seq in primers_dict.items():
+    for primer_id, primer_seq in tqdm(
+        primers_dict.items(),
+        desc="🧬 Alignement amorces / Aligning primers",
+        unit=" primer",
+        colour="magenta"
+    ):
         record = align_one_primer(
             primer_id, primer_seq,
             ref_ungapped_str, ref_gapped_str,
@@ -418,7 +440,7 @@ def main():
         if record:
             out_records.append(record)
         else:
-            print(f"  [-] Non trouvé : {primer_id}")
+            tqdm.write(f"  [-] Non trouvé / Not found : {primer_id}")
 
     # Écriture du fichier de sortie / Write output file
     try:
