@@ -185,8 +185,9 @@ def auto_split_fip_bip(primer_sets, targets, txt):
                 # On cherche d'abord avec 0 erreur, puis 1, puis 2
                 for allowed_err in [0, 1, 2]:
                     if found_split: break
-                    # Ensuite on teste l'absence de linker, puis les linkers standards jusqu'à 9 bases
-                    for linker_len in [0, 4, 1, 2, 3, 5, 6, 7, 8, 9]:
+                    # Ensuite on teste l'absence de linker (0), puis les linkers biologiquement valides (4 à 9 bases)
+                    # Next we test the absence of linker (0), then biologically valid linkers (4 to 9 bases)
+                    for linker_len in [0, 4, 5, 6, 7, 8, 9]:
                         if found_split: break
                         for t_seq in test_targets:
                             if found_split: break
