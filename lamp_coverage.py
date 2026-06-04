@@ -336,7 +336,7 @@ def main():
             'global_raw': "Match Global du Set (Intersection Brute, toutes amorces présentes)",
             'global_valid': "Match Global Valide (Intersection + Ordre Correct structurel LAMP)",
             'amplified_seqs': "Séquences amplifiées théoriquement par le Set {} :",
-            'table_header': "Séquence_ID\tTaille_Amplicon\tStatut_Ordre",
+            'table_header': "Séquence_ID\tTaille_Amplicon\tStatut_Ordre\tOrdre_Observe",
             'order_correct': "Ordre Correct",
             'order_incorrect': "Ordre Incorrect",
             'no_seq': "(Aucune séquence ne remplit les critères d'amplification)",
@@ -371,7 +371,7 @@ def main():
             'global_raw': "Set Global Match (Raw Intersection, all primers present)",
             'global_valid': "Set Valid Global Match (Intersection + Structurally Correct LAMP Order)",
             'amplified_seqs': "Theoretically amplified sequences by Set {} :",
-            'table_header': "Sequence_ID\tAmplicon_Size\tOrder_Status",
+            'table_header': "Sequence_ID\tAmplicon_Size\tOrder_Status\tObserved_Order",
             'order_correct': "Correct Order",
             'order_incorrect': "Incorrect Order",
             'no_seq': "(No sequences meet the amplification criteria)",
@@ -558,7 +558,8 @@ def main():
                     amplicon_size = max(ends) - min(starts)
                     
                     status = txt['order_correct'] if is_correct_order else txt['order_incorrect']
-                    seq_details.append((seq_id, amplicon_size, status))
+                    observed_order = "-".join(sorted_primers)
+                    seq_details.append((seq_id, amplicon_size, status, observed_order))
                     
                 # Sauvegarde pour combine
                 valid_sequences_per_set[set_id] = set(valid_order_matches)
@@ -577,7 +578,7 @@ def main():
                     if seq_details:
                         seq_details.sort(key=lambda x: x[0])
                         for detail in seq_details:
-                            out.write(f"{detail[0]}\t{detail[1]}\t{detail[2]}\n")
+                            out.write(f"{detail[0]}\t{detail[1]}\t{detail[2]}\t{detail[3]}\n")
                     else:
                         out.write(f"{txt['no_seq']}\n")
                 
