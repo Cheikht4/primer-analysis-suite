@@ -174,8 +174,8 @@ def load_primers(filepath, is_pcr=False):
                 # Gestion des alias
                 if is_pcr:
                     alias_map = {
-                        'FWD': 'F', 'FORWARD': 'F', 'F3': 'F',
-                        'REV': 'R', 'REVERSE': 'R', 'B3': 'R',
+                        'FWD': 'F', 'FORWARD': 'F', 'F3': 'F', 'FP': 'F',
+                        'REV': 'R', 'REVERSE': 'R', 'B3': 'R', 'RP': 'R',
                         'PROBE': 'P', 'SONDE': 'P'
                     }
                 else:
@@ -426,9 +426,29 @@ def main():
         print(txt['primer_err'])
         sys.exit(1)
     
+    suspected_pcr = False
     if not args.pcr:
         # Tentative de séparation auto de FIP et BIP
         auto_split_fip_bip(primer_sets, targets, txt)
+        
+        # Vérification si un essai PCR est suspecté en mode LAMP / Checking if a PCR assay is suspected in LAMP mode
+        for s_id, primers in primer_sets.items():
+            set_keys = {k.upper() for k in primers.keys()}
+            if 'FP' in set_keys or 'RP' in set_keys or 'PROBE' in set_keys or (set_keys.issubset({'F', 'R', 'P'}) and not set_keys.intersection({'F3', 'B3', 'F2', 'F1', 'B1', 'B2', 'FIP', 'BIP'})):
+                suspected_pcr = True
+                break
+                
+        if suspected_pcr:
+            print("\n" + "!" * 70)
+            if args.lng == 'fr':
+                print("⚠️  ATTENTION : Les amorces ressemblent à un essai PCR (FP, RP, Probe).")
+                print("   Le script s'exécute actuellement en mode LAMP.")
+                print("   Veuillez relancer avec l'option '--pcr' pour une analyse correcte.")
+            else:
+                print("⚠️  WARNING: The primers look like a PCR assay (FP, RP, Probe).")
+                print("   The script is currently running in LAMP mode.")
+                print("   Please rerun with the '--pcr' option for a correct analysis.")
+            print("!" * 70 + "\n")
     
     print(f"{len(primer_sets)} {txt['primer_loaded']}")
     print(txt['analysis'].format(args.errors, args.strict_3prime))
@@ -473,6 +493,13 @@ def main():
     
     try:
         with open(args.output, 'w') as out:
+            if not args.pcr and suspected_pcr:
+                if args.lng == 'fr':
+                    out.write("⚠️  ATTENTION : Détecté comme essai PCR mais exécuté en mode LAMP. Veuillez utiliser --pcr.\n")
+                else:
+                    out.write("⚠️  WARNING: Detected as PCR assay but executed in LAMP mode. Please use --pcr.\n")
+                out.write("=" * 80 + "\n\n")
+                
             out.write(f"{txt['report_title']}\n")
             out.write("=" * max(len(txt['report_title']), 38) + "\n")
             out.write(f"{txt['target_file']} : {args.target} ({total_targets} {txt['seqs_word']})\n")
