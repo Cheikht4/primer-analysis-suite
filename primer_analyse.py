@@ -33,8 +33,10 @@ def main():
     lamp_group.add_argument("-s", "--strict-3prime", default="3", help="Taille zone 3' stricte / Strict 3' region size. Def: 3")
     lamp_group.add_argument("--summary-only", action="store_true", help="N'affiche que les statistiques (lamp) / Output only summary statistics")
     lamp_group.add_argument("--combine", action="store_true", help="Couverture combinatoire 2 à 2 (lamp) / Calculate 2-by-2 multiplexing coverage")
+    lamp_group.add_argument("--strict-3prime-tolerate", type=int, choices=[0, 1, 2], default=0, help="Niveau de tolérance en zone 3' (0: tout strict, 1: pos 2 tolérée, 2: pos 1 et 2 tolérées) / Tolerance level in the 3' region (0, 1, or 2)")
     lamp_group.add_argument("--export-seqs", action="store_true", help="Exporte les séquences validées (lamp) / Export validated sequences per set")
     lamp_group.add_argument("--pcr", action="store_true", help="Mode PCR (lamp) / PCR mode")
+    lamp_group.add_argument("--strict-intersection", action="store_true", help="Exige que toutes les amorces du fichier matchent la cible (lamp) / Requires all primers in the file to match the target")
 
     args = parser.parse_args()
     
@@ -121,6 +123,10 @@ def main():
             cmd_lamp.append("--export-seqs")
         if args.pcr:
             cmd_lamp.append("--pcr")
+        if args.strict_3prime_tolerate > 0:
+            cmd_lamp.extend(["--strict-3prime-tolerate", str(args.strict_3prime_tolerate)])
+        if args.strict_intersection:
+            cmd_lamp.append("--strict-intersection")
             
         subprocess.run(cmd_lamp)
         print()

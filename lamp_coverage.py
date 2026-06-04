@@ -41,28 +41,60 @@ def seq_to_regex(seq):
             pattern += IUPAC_DICT.get(char, char)
     return pattern
 
-def primer_matches_sequence(target_seq, primer_seq, max_errors, strict_3prime_len=3):
+def primer_matches_sequence(target_seq, primer_seq, max_errors, strict_3prime_len=3, strict_3prime_tolerate=0):
     """
     Vérifie si l'amorce match la séquence cible (brin sens ou anti-sens).
     Retourne un tuple (start, end) de la position du match sur le brin sens,
     ou None s'il n'y a pas de match.
     """
+    # Définition des positions tolérées / Definition of tolerated positions
+    # Position 1 = base -1, Position 2 = base -2, Position 3 = base -3 (compté depuis l'extrémité 3' / counted from 3' end)
+    tolerate_positions = set()
+    if strict_3prime_tolerate == 1:
+        tolerate_positions = {2}
+    elif strict_3prime_tolerate == 2:
+        tolerate_positions = {1, 2}
+
     def build_regex(seq, max_e, strict_len, is_rc=False):
         if strict_len > 0 and len(seq) > strict_len:
+            # Choix du type d'erreur pour la partie 5' : substitutions uniquement (s) en mode ARMS pour éviter les décalages d'indels
+            # Choice of error type for the 5' part: substitutions only (s) in ARMS mode to avoid indel shifts
+            type_e = 's' if strict_3prime_tolerate > 0 else 'e'
+            
             if not is_rc:
-                # Brin sens
+                # Brin sens / Sense strand
                 seq_5 = seq[:-strict_len]
-                seq_3 = seq[-strict_len:]
                 pattern_5 = seq_to_regex(seq_5)
-                pattern_3 = seq_to_regex(seq_3)
-                return f"(?e)(?:{pattern_5}){{e<={max_e}}}{pattern_3}"
+                
+                # Construction de la zone 3' base par base / Building the 3' region base by base
+                pattern_3 = ""
+                # De la base la plus éloignée de 3' vers la base terminale (5' vers 3') / From the base furthest from 3' to the terminal base (5' to 3')
+                for k in range(strict_len, 0, -1):
+                    base = seq[-k]
+                    base_regex = seq_to_regex(base)
+                    if k in tolerate_positions:
+                        pattern_3 += f"(?:{base_regex}){{s<=1}}"
+                    else:
+                        pattern_3 += base_regex
+                
+                return f"(?e)(?:{pattern_5}){{{type_e}<={max_e}}}{pattern_3}"
             else:
-                # Brin anti-sens
-                seq_3_rc = seq[:strict_len]
-                seq_5_rc = seq[strict_len:]
-                pattern_3_rc = seq_to_regex(seq_3_rc)
+                # Brin anti-sens / Antisense strand
+                primer_rc = seq # Ici seq est déjà primer_rc / Here seq is already primer_rc
+                seq_5_rc = primer_rc[strict_len:]
                 pattern_5_rc = seq_to_regex(seq_5_rc)
-                return f"(?e){pattern_3_rc}(?:{pattern_5_rc}){{e<={max_e}}}"
+                
+                # Le 3' de l'amorce originale correspond au début (5') de primer_rc / The 3' of the original primer corresponds to the beginning (5') of primer_rc
+                pattern_3_rc = ""
+                for k in range(1, strict_len + 1):
+                    base = primer_rc[k-1]
+                    base_regex = seq_to_regex(base)
+                    if k in tolerate_positions:
+                        pattern_3_rc += f"(?:{base_regex}){{s<=1}}"
+                    else:
+                        pattern_3_rc += base_regex
+                
+                return f"(?e){pattern_3_rc}(?:{pattern_5_rc}){{{type_e}<={max_e}}}"
         else:
             pattern = seq_to_regex(seq)
             return f"(?e)({pattern}){{e<={max_e}}}"
@@ -266,6 +298,8 @@ def main():
     parser.add_argument("-o", "--output", required=True, help="Fichier de rapport en sortie / Output report file.")
     parser.add_argument("-e", "--errors", type=int, default=0, help="Nombre max d'erreurs hors zone 3' / Max errors outside 3' region. Def: 0")
     parser.add_argument("-s", "--strict-3prime", type=int, default=3, dest="strict_3prime", help="Taille zone 3' stricte / Strict 3' region size. Def: 3")
+    parser.add_argument("--strict-3prime-tolerate", type=int, choices=[0, 1, 2], default=0, help="Niveau de tolérance en zone 3' (0: tout strict, 1: pos 2 tolérée, 2: pos 1 et 2 tolérées). / Tolerance level in the 3' region (0: all strict, 1: pos 2 tolerated, 2: pos 1 and 2 tolerated).")
+    parser.add_argument("--strict-intersection", action="store_true", help="Exige que toutes les amorces du fichier matchent la cible (comportement strict historique). / Requires all primers in the file to match the target (historical strict behavior).")
     
     # Options de sortie
     parser.add_argument("--summary-only", action="store_true", help="N'affiche que les statistiques / Output only summary statistics.")
@@ -411,7 +445,7 @@ def main():
         for set_id, primers in primer_sets.items():
             for seq_id, seq in targets.items():
                 for primer_id, primer_seq in primers.items():
-                    pos = primer_matches_sequence(seq, primer_seq, args.errors, args.strict_3prime)
+                    pos = primer_matches_sequence(seq, primer_seq, args.errors, args.strict_3prime, args.strict_3prime_tolerate)
                     if pos:
                         primer_matches[set_id][primer_id].add(seq_id)
                         primer_positions[set_id][seq_id][primer_id] = pos
@@ -429,6 +463,11 @@ def main():
         MASTER_ORDER = ['F3', 'F2', 'FLOOP', 'F1', 'STEMF', 'STEMB', 'B1', 'BLOOP', 'B2', 'B3']
     MASTER_ORDER_RC = list(reversed(MASTER_ORDER))
     
+    # Définition des amorces essentielles (utilisées pour l'intersection relaxée)
+    # Definition of essential primers (used for relaxed intersection)
+    ESSENTIAL_LAMP = {'F3', 'B3', 'F2', 'F1', 'B1', 'B2', 'FIP', 'BIP'}
+    ESSENTIAL_PCR = {'F', 'R'}
+    
     # Stockage des sets de séquences valides pour le calcul combinatoire
     valid_sequences_per_set = {}
     
@@ -445,6 +484,7 @@ def main():
             if args.summary_only: active_options.append("--summary-only")
             if args.combine: active_options.append("--combine")
             if args.export_seqs: active_options.append("--export-seqs")
+            if args.strict_intersection: active_options.append("--strict-intersection")
             if active_options:
                 out.write(f"{txt['active_options']} : {', '.join(active_options)}\n")
             out.write("\n")
@@ -460,16 +500,46 @@ def main():
                     match_pct = (len(matches) / total_targets) * 100
                     out.write(f"  - {primer_id} : {match_pct:.2f}% ({len(matches)}/{total_targets})\n")
                 
+                # Intersection brute (toutes les amorces présentes matchent)
+                # Raw intersection (all present primers must match)
                 if set_matches_list:
                     intersection_matches = set.intersection(*set_matches_list)
                 else:
                     intersection_matches = set()
                     
+                # Détermination des amorces essentielles présentes dans le set d'amorces
+                # Determination of essential primers present in the primer set
+                if args.pcr:
+                    essential_in_set = [p for p in primers.keys() if p in ESSENTIAL_PCR]
+                else:
+                    essential_in_set = [p for p in primers.keys() if p in ESSENTIAL_LAMP]
+                    
+                # Fallback sur toutes les amorces s'il n'y a pas d'essentielles identifiées
+                # Fallback to all primers if no essential primers are identified
+                if not essential_in_set:
+                    essential_in_set = list(primers.keys())
+                    
+                # Intersection essentielle (uniquement sur les amorces essentielles présentes)
+                # Essential intersection (only on present essential primers)
+                essential_matches_list = [primer_matches[set_id][p] for p in essential_in_set]
+                if essential_matches_list:
+                    essential_intersection_matches = set.intersection(*essential_matches_list)
+                else:
+                    essential_intersection_matches = set()
+                    
+                # Sélection de l'intersection pour la validation (brute ou essentielle)
+                # Selection of the intersection for validation (raw or essential)
+                if args.strict_intersection:
+                    validation_matches = intersection_matches
+                else:
+                    validation_matches = essential_intersection_matches
+                    
                 valid_order_matches = []
                 seq_details = []
                 
                 # Vérification de l'ordre et calcul de la taille de l'amplicon
-                for seq_id in intersection_matches:
+                # Order verification and amplicon size calculation
+                for seq_id in validation_matches:
                     positions = primer_positions[set_id][seq_id]
                     
                     # Tri des noms d'amorces selon la coordonnée de départ
