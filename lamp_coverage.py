@@ -2,6 +2,7 @@
 import argparse
 import sys
 import os
+import re
 import itertools
 import regex
 from collections import defaultdict
@@ -171,7 +172,7 @@ def load_primers(filepath, is_pcr=False):
                     set_id = "Default"
                     primer_id = name
                     
-                # Gestion des alias
+                # Gestion des alias / Alias resolution
                 if is_pcr:
                     alias_map = {
                         'FWD': 'F', 'FORWARD': 'F', 'F3': 'F', 'FP': 'F',
@@ -189,7 +190,32 @@ def load_primers(filepath, is_pcr=False):
                         'F1C': 'F1',
                         'B1C': 'B1'
                     }
-                primer_id = alias_map.get(primer_id.upper(), primer_id)
+                # Résolution flexible des alias (tolère suffixes/préfixes numériques ou alphabétiques)
+                # Flexible alias resolution (tolerates numeric/alpha suffixes and prefixes)
+                primer_id_upper = primer_id.upper()
+                resolved = alias_map.get(primer_id_upper)  # 1. Correspondance exacte / Exact match
+                if resolved is None:
+                    # 2. Recherche par préfixe (ex: FP1 → FP → F, RP2 → RP → R)
+                    # Prefix search (e.g. FP1 → FP → F, RP2 → RP → R)
+                    for key in sorted(alias_map.keys(), key=len, reverse=True):
+                        if primer_id_upper.startswith(key):
+                            resolved = alias_map[key]
+                            break
+                if resolved is None:
+                    # 3. Suppression du suffixe non-alpha final (ex: Probe1 → Probe, RP2 → RP)
+                    # Strip trailing non-alpha suffix (e.g. Probe1 → Probe, RP2 → RP)
+                    stripped = re.sub(r'[^A-Z]+$', '', primer_id_upper)
+                    resolved = alias_map.get(stripped)
+                if resolved is None:
+                    # 4. Recherche par suffixe (ex: SFP → FP → F, SRP → RP → R)
+                    # Suffix search (e.g. SFP → FP → F, SRP → RP → R)
+                    for key in sorted(alias_map.keys(), key=len, reverse=True):
+                        if primer_id_upper.endswith(key):
+                            resolved = alias_map[key]
+                            break
+                if resolved is not None:
+                    primer_id = resolved
+                # Sinon, on conserve le nom original / Otherwise keep original name
                     
                 primer_sets[set_id][primer_id] = seq
                 
