@@ -360,7 +360,8 @@ def main():
             'set_title': "--- SET D'AMORCES : {} ---",
             'indiv_match': "Matchs individuels par amorce :",
             'global_raw': "Match Global du Set (Intersection Brute, toutes amorces présentes)",
-            'global_valid': "Match Global Valide (Intersection + Ordre Correct structurel LAMP)",
+            'global_base': "Match de Base du Set (Intersection Validation : amorces essentielles uniquement)",
+            'global_valid': "Match Global Valide (Intersection Base + Ordre Correct structurel LAMP)",
             'amplified_seqs': "Séquences amplifiées théoriquement par le Set {} :",
             'table_header': "Séquence_ID\tTaille_Amplicon\tStatut_Ordre\tOrdre_Observe",
             'order_correct': "Ordre Correct",
@@ -395,7 +396,8 @@ def main():
             'set_title': "--- PRIMER SET : {} ---",
             'indiv_match': "Individual matches per primer:",
             'global_raw': "Set Global Match (Raw Intersection, all primers present)",
-            'global_valid': "Set Valid Global Match (Intersection + Structurally Correct LAMP Order)",
+            'global_base': "Set Base Match (Validation Intersection: essential primers only)",
+            'global_valid': "Set Valid Global Match (Base Intersection + Structurally Correct LAMP Order)",
             'amplified_seqs': "Theoretically amplified sequences by Set {} :",
             'table_header': "Sequence_ID\tAmplicon_Size\tOrder_Status\tObserved_Order",
             'order_correct': "Correct Order",
@@ -417,10 +419,12 @@ def main():
     if args.pcr:
         if lang == 'fr':
             txt['report_title'] = "Rapport de Couverture des Amorces PCR"
-            txt['global_valid'] = "Match Global Valide (Intersection + Ordre PCR Correct)"
+            txt['global_base']  = "Match de Base du Set (Intersection Validation : amorces essentielles uniquement)"
+            txt['global_valid'] = "Match Global Valide (Intersection Base + Ordre PCR Correct)"
         else:
             txt['report_title'] = "PCR Primer Coverage Report"
-            txt['global_valid'] = "Set Valid Global Match (Intersection + Structurally Correct PCR Order)"
+            txt['global_base']  = "Set Base Match (Validation Intersection: essential primers only)"
+            txt['global_valid'] = "Set Valid Global Match (Base Intersection + Structurally Correct PCR Order)"
     
     print(txt['target_load'])
     targets = {}
@@ -617,10 +621,18 @@ def main():
                 # Sauvegarde pour combine
                 valid_sequences_per_set[set_id] = set(valid_order_matches)
                 
-                global_match_pct = (len(intersection_matches) / total_targets) * 100
-                valid_match_pct = (len(valid_order_matches) / total_targets) * 100 if total_targets > 0 else 0
+                # Calcul des pourcentages / Percentage calculation
+                raw_match_pct   = (len(intersection_matches)   / total_targets) * 100
+                base_match_pct  = (len(validation_matches)     / total_targets) * 100
+                valid_match_pct = (len(valid_order_matches)    / total_targets) * 100 if total_targets > 0 else 0
                 
-                out.write(f"\n{txt['global_raw']} : {global_match_pct:.2f}% ({len(intersection_matches)}/{total_targets})\n")
+                # Affichage : Brut (toutes amorces) > Base (essentielles) ≥ Valide (ordre)
+                # Display : Raw (all primers) ≥ Base (essentials) ≥ Valid (order)
+                out.write(f"\n{txt['global_raw']} : {raw_match_pct:.2f}% ({len(intersection_matches)}/{total_targets})\n")
+                # N'afficher la ligne Base que si elle diffère du Brut (i.e. mode relaxé avec amorces optionnelles)
+                # Only show Base line if it differs from Raw (i.e. relaxed mode with optional primers)
+                if validation_matches != intersection_matches:
+                    out.write(f"{txt['global_base']} : {base_match_pct:.2f}% ({len(validation_matches)}/{total_targets})\n")
                 out.write(f"{txt['global_valid']} : {valid_match_pct:.2f}% ({len(valid_order_matches)}/{total_targets})\n")
                 
                 # 1. Option : Ne pas afficher les séquences (si --summary-only)
