@@ -326,6 +326,8 @@ def main():
     parser.add_argument("-s", "--strict-3prime", type=int, default=3, dest="strict_3prime", help="Taille zone 3' stricte / Strict 3' region size. Def: 3")
     parser.add_argument("--strict-3prime-tolerate", type=int, choices=[0, 1, 2], default=0, help="Niveau de tolérance en zone 3' (0: tout strict, 1: pos 2 tolérée, 2: pos 1 et 2 tolérées). / Tolerance level in the 3' region (0: all strict, 1: pos 2 tolerated, 2: pos 1 and 2 tolerated).")
     parser.add_argument("--strict-intersection", action="store_true", help="Exige que toutes les amorces du fichier matchent la cible (comportement strict historique). / Requires all primers in the file to match the target (historical strict behavior).")
+    parser.add_argument("--max-n-run", type=int, default=10, dest="max_n_run",
+        help="Exclure les séquences ayant un run de N consécutifs égal ou supérieur à cette valeur / Exclude sequences with a run of consecutive N's >= this value. 0 = désactivé/disabled. Def: 10")
     
     # Options de sortie
     parser.add_argument("--summary-only", action="store_true", help="N'affiche que les statistiques / Output only summary statistics.")
@@ -362,6 +364,8 @@ def main():
             'global_raw': "Match Global du Set (Intersection Brute, toutes amorces présentes)",
             'global_base': "Match de Base du Set (Intersection Validation : amorces essentielles uniquement)",
             'global_valid': "Match Global Valide (Intersection Base + Ordre Correct structurel LAMP)",
+            'excluded_label': "Séquences de mauvaise qualité exclues (run de N ≥ {})",
+            'total_analysed': "Total de séquences analysées",
             'amplified_seqs': "Séquences amplifiées théoriquement par le Set {} :",
             'table_header': "Séquence_ID\tTaille_Amplicon\tStatut_Ordre\tOrdre_Observe",
             'order_correct': "Ordre Correct",
@@ -398,6 +402,8 @@ def main():
             'global_raw': "Set Global Match (Raw Intersection, all primers present)",
             'global_base': "Set Base Match (Validation Intersection: essential primers only)",
             'global_valid': "Set Valid Global Match (Base Intersection + Structurally Correct LAMP Order)",
+            'excluded_label': "Bad quality sequences excluded (N-run >= {})",
+            'total_analysed': "Total sequences analysed",
             'amplified_seqs': "Theoretically amplified sequences by Set {} :",
             'table_header': "Sequence_ID\tAmplicon_Size\tOrder_Status\tObserved_Order",
             'order_correct': "Correct Order",
@@ -444,11 +450,30 @@ def main():
         print(f"Error: {e}")
         sys.exit(1)
 
+    total_targets_loaded = len(targets)
+    if total_targets_loaded == 0:
+        print(txt['target_err'])
+        sys.exit(1)
+    print(f"{total_targets_loaded} {txt['target_loaded']}")
+
+    # Filtre qualité : exclut les séquences avec des runs de N trop longs
+    # Quality filter: exclude sequences with excessively long N-runs
+    n_excluded = 0
+    if args.max_n_run > 0:
+        n_run_pattern = re.compile(r'N{' + str(args.max_n_run) + r',}', re.IGNORECASE)
+        bad_ids = {sid for sid, seq in targets.items() if n_run_pattern.search(seq)}
+        n_excluded = len(bad_ids)
+        if n_excluded > 0:
+            targets = {sid: seq for sid, seq in targets.items() if sid not in bad_ids}
+            if lang == 'fr':
+                print(f"  ⚠️  {n_excluded} séquence(s) de mauvaise qualité exclues (run de N ≥ {args.max_n_run}).")
+            else:
+                print(f"  ⚠️  {n_excluded} bad quality sequence(s) excluded (N-run >= {args.max_n_run}).")
+
     total_targets = len(targets)
     if total_targets == 0:
         print(txt['target_err'])
         sys.exit(1)
-    print(f"{total_targets} {txt['target_loaded']}")
     
     print(txt['primer_load'])
     primer_sets = load_primers(args.primers, is_pcr=args.pcr)
@@ -548,7 +573,12 @@ def main():
             
             for set_id, primers in primer_sets.items():
                 out.write(txt['set_title'].format(set_id) + "\n")
-                
+
+                # Affichage des exclusions de mauvaise qualité / Display of quality exclusions
+                if args.max_n_run > 0:
+                    out.write(f"{txt['excluded_label'].format(args.max_n_run)} : {n_excluded}\n")
+                    out.write(f"{txt['total_analysed']} : {total_targets}\n")
+
                 set_matches_list = []
                 out.write(f"{txt['indiv_match']}\n")
                 for primer_id, primer_seq in primers.items():

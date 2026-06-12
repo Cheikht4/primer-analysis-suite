@@ -37,6 +37,8 @@ def main():
     lamp_group.add_argument("--export-seqs", action="store_true", help="Exporte les séquences validées (lamp) / Export validated sequences per set")
     lamp_group.add_argument("--pcr", action="store_true", help="Mode PCR (lamp) / PCR mode")
     lamp_group.add_argument("--strict-intersection", action="store_true", help="Exige que toutes les amorces du fichier matchent la cible (lamp) / Requires all primers in the file to match the target")
+    lamp_group.add_argument("--max-n-run", type=int, default=10, dest="max_n_run",
+        help="Exclure les séquences avec un run de N consécutifs ≥ cette valeur / Exclude sequences with N-run >= this value. 0=désactivé/disabled. Def: 10")
 
     args = parser.parse_args()
     
@@ -127,6 +129,8 @@ def main():
             cmd_lamp.extend(["--strict-3prime-tolerate", str(args.strict_3prime_tolerate)])
         if args.strict_intersection:
             cmd_lamp.append("--strict-intersection")
+        if args.max_n_run != 10:  # Ne transmet que si différent de la valeur par défaut / Only pass if different from default
+            cmd_lamp.extend(["--max-n-run", str(args.max_n_run)])
             
         subprocess.run(cmd_lamp)
         print()
