@@ -326,8 +326,8 @@ def main():
     parser.add_argument("-s", "--strict-3prime", type=int, default=3, dest="strict_3prime", help="Taille zone 3' stricte / Strict 3' region size. Def: 3")
     parser.add_argument("--strict-3prime-tolerate", type=int, choices=[0, 1, 2], default=0, help="Niveau de tolérance en zone 3' (0: tout strict, 1: pos 2 tolérée, 2: pos 1 et 2 tolérées). / Tolerance level in the 3' region (0: all strict, 1: pos 2 tolerated, 2: pos 1 and 2 tolerated).")
     parser.add_argument("--strict-intersection", action="store_true", help="Exige que toutes les amorces du fichier matchent la cible (comportement strict historique). / Requires all primers in the file to match the target (historical strict behavior).")
-    parser.add_argument("--max-n-run", type=int, default=10, dest="max_n_run",
-        help="Exclure les séquences ayant un run de N consécutifs égal ou supérieur à cette valeur / Exclude sequences with a run of consecutive N's >= this value. 0 = désactivé/disabled. Def: 10")
+    parser.add_argument("--max-n-run", type=int, default=5, dest="max_n_run",
+        help="Exclure les séquences ayant un run de N consécutifs égal ou supérieur à cette valeur / Exclude sequences with a run of consecutive N's >= this value. 0 = désactivé/disabled. Def: 5")
     
     # Options de sortie
     parser.add_argument("--summary-only", action="store_true", help="N'affiche que les statistiques / Output only summary statistics.")
