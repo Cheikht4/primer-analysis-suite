@@ -129,8 +129,8 @@ def main():
             cmd_lamp.extend(["--strict-3prime-tolerate", str(args.strict_3prime_tolerate)])
         if args.strict_intersection:
             cmd_lamp.append("--strict-intersection")
-        if args.max_n_run != 5:  # Ne transmet que si différent de la valeur par défaut / Only pass if different from default
-            cmd_lamp.extend(["--max-n-run", str(args.max_n_run)])
+        # Toujours transmettre --max-n-run pour garantir que le filtre est actif / Always pass --max-n-run to ensure filter is active
+        cmd_lamp.extend(["--max-n-run", str(args.max_n_run)])
             
         subprocess.run(cmd_lamp)
         print()
