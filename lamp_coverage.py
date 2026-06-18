@@ -450,30 +450,17 @@ def main():
         print(f"Error: {e}")
         sys.exit(1)
 
-    total_targets_loaded = len(targets)
-    if total_targets_loaded == 0:
-        print(txt['target_err'])
-        sys.exit(1)
-    print(f"{total_targets_loaded} {txt['target_loaded']}")
-
-    # Filtre qualité : exclut les séquences avec des runs de N trop longs
-    # Quality filter: exclude sequences with excessively long N-runs
-    n_excluded = 0
-    if args.max_n_run > 0:
-        n_run_pattern = re.compile(r'N{' + str(args.max_n_run) + r',}', re.IGNORECASE)
-        bad_ids = {sid for sid, seq in targets.items() if n_run_pattern.search(seq)}
-        n_excluded = len(bad_ids)
-        if n_excluded > 0:
-            targets = {sid: seq for sid, seq in targets.items() if sid not in bad_ids}
-            if lang == 'fr':
-                print(f"  ⚠️  {n_excluded} séquence(s) de mauvaise qualité exclues (run de N ≥ {args.max_n_run}).")
-            else:
-                print(f"  ⚠️  {n_excluded} bad quality sequence(s) excluded (N-run >= {args.max_n_run}).")
-
     total_targets = len(targets)
     if total_targets == 0:
         print(txt['target_err'])
         sys.exit(1)
+    print(f"{total_targets} {txt['target_loaded']}")
+
+    # Compilation du pattern N-run pour le filtre qualité par set (utilisé dans la boucle de matching)
+    # Compile N-run pattern for per-set quality filter (used in the matching loop)
+    n_run_pattern = None
+    if args.max_n_run > 0:
+        n_run_pattern = re.compile(r'N{' + str(args.max_n_run) + r',}', re.IGNORECASE)
     
     print(txt['primer_load'])
     primer_sets = load_primers(args.primers, is_pcr=args.pcr)
@@ -510,6 +497,9 @@ def main():
     
     primer_matches = defaultdict(lambda: defaultdict(set))
     primer_positions = defaultdict(lambda: defaultdict(dict))
+    # Séquences exclues par set (mauvaise qualité dans les zones de fixation)
+    # Excluded sequences per set (bad quality in binding regions)
+    bad_seqs_per_set = defaultdict(set)
 
     # Boucle principale d'analyse avec barre de progression tqdm
     # Main analysis loop with tqdm progress bar
@@ -519,9 +509,27 @@ def main():
     with tqdm(total=total_steps, desc=bar_label, unit=" seq", colour="green") as pbar:
         for set_id, primers in primer_sets.items():
             for seq_id, seq in targets.items():
+                seq_has_bad_region = False
+                temp_matches = {}  # Stockage temporaire des matchs / Temporary match storage
                 for primer_id, primer_seq in primers.items():
                     pos = primer_matches_sequence(seq, primer_seq, args.errors, args.strict_3prime, args.strict_3prime_tolerate)
                     if pos:
+                        # Vérification N-run dans la zone de fixation de l'amorce
+                        # Check for N-run in the primer binding region
+                        if n_run_pattern is not None:
+                            matched_region = seq[pos[0]:pos[1]]
+                            if n_run_pattern.search(matched_region):
+                                seq_has_bad_region = True
+                                break  # Inutile de continuer / No need to continue
+                        temp_matches[primer_id] = pos
+
+                # Si une zone de fixation contient des N consécutifs, exclure la séquence pour ce set
+                # If a binding region contains consecutive N's, exclude the sequence for this set
+                if seq_has_bad_region:
+                    bad_seqs_per_set[set_id].add(seq_id)
+                else:
+                    # Enregistrer les matchs valides / Record valid matches
+                    for primer_id, pos in temp_matches.items():
                         primer_matches[set_id][primer_id].add(seq_id)
                         primer_positions[set_id][seq_id][primer_id] = pos
 
@@ -574,18 +582,23 @@ def main():
             for set_id, primers in primer_sets.items():
                 out.write(txt['set_title'].format(set_id) + "\n")
 
+                # Nombre de séquences exclues pour ce set / Number of excluded sequences for this set
+                set_n_excluded = len(bad_seqs_per_set.get(set_id, set()))
+                effective_targets = total_targets - set_n_excluded
+
                 # Affichage des exclusions de mauvaise qualité / Display of quality exclusions
                 if args.max_n_run > 0:
-                    out.write(f"{txt['excluded_label'].format(args.max_n_run)} : {n_excluded}\n")
-                    out.write(f"{txt['total_analysed']} : {total_targets}\n")
+                    out.write(f"{txt['excluded_label'].format(args.max_n_run)} : {set_n_excluded}\n")
+                    out.write(f"{txt['total_analysed']} : {effective_targets}\n")
 
                 set_matches_list = []
                 out.write(f"{txt['indiv_match']}\n")
+                denom = effective_targets if effective_targets > 0 else 1
                 for primer_id, primer_seq in primers.items():
                     matches = primer_matches[set_id][primer_id]
                     set_matches_list.append(matches)
-                    match_pct = (len(matches) / total_targets) * 100
-                    out.write(f"  - {primer_id} : {match_pct:.2f}% ({len(matches)}/{total_targets})\n")
+                    match_pct = (len(matches) / denom) * 100
+                    out.write(f"  - {primer_id} : {match_pct:.2f}% ({len(matches)}/{effective_targets})\n")
                 
                 # Intersection brute (toutes les amorces présentes matchent)
                 # Raw intersection (all present primers must match)
@@ -651,19 +664,20 @@ def main():
                 # Sauvegarde pour combine
                 valid_sequences_per_set[set_id] = set(valid_order_matches)
                 
-                # Calcul des pourcentages / Percentage calculation
-                raw_match_pct   = (len(intersection_matches)   / total_targets) * 100
-                base_match_pct  = (len(validation_matches)     / total_targets) * 100
-                valid_match_pct = (len(valid_order_matches)    / total_targets) * 100 if total_targets > 0 else 0
+                # Calcul des pourcentages (sur le nombre effectif de séquences analysées pour ce set)
+                # Percentage calculation (based on effective number of sequences analysed for this set)
+                raw_match_pct   = (len(intersection_matches)   / denom) * 100
+                base_match_pct  = (len(validation_matches)     / denom) * 100
+                valid_match_pct = (len(valid_order_matches)    / denom) * 100 if denom > 0 else 0
                 
                 # Affichage : Brut (toutes amorces) > Base (essentielles) ≥ Valide (ordre)
                 # Display : Raw (all primers) ≥ Base (essentials) ≥ Valid (order)
-                out.write(f"\n{txt['global_raw']} : {raw_match_pct:.2f}% ({len(intersection_matches)}/{total_targets})\n")
+                out.write(f"\n{txt['global_raw']} : {raw_match_pct:.2f}% ({len(intersection_matches)}/{effective_targets})\n")
                 # N'afficher la ligne Base que si elle diffère du Brut (i.e. mode relaxé avec amorces optionnelles)
                 # Only show Base line if it differs from Raw (i.e. relaxed mode with optional primers)
                 if validation_matches != intersection_matches:
-                    out.write(f"{txt['global_base']} : {base_match_pct:.2f}% ({len(validation_matches)}/{total_targets})\n")
-                out.write(f"{txt['global_valid']} : {valid_match_pct:.2f}% ({len(valid_order_matches)}/{total_targets})\n")
+                    out.write(f"{txt['global_base']} : {base_match_pct:.2f}% ({len(validation_matches)}/{effective_targets})\n")
+                out.write(f"{txt['global_valid']} : {valid_match_pct:.2f}% ({len(valid_order_matches)}/{effective_targets})\n")
                 
                 # 1. Option : Ne pas afficher les séquences (si --summary-only)
                 if not args.summary_only:
