@@ -5,7 +5,7 @@ import os
 import re
 import itertools
 import regex
-from collections import defaultdict
+from collections import defaultdict, Counter
 from Bio import SeqIO
 from Bio.Seq import Seq
 
@@ -34,8 +34,226 @@ IUPAC_DICT = {
     'H': '[ACT]', 'V': '[ACG]', 'N': '[ACGT]'
 }
 
+# =============================================================================
+# Types canoniques d'amorces (utilisés pour la détection des multi-versions)
+# Canonical primer types (used for multi-version detection)
+# =============================================================================
+
+# LAMP : noms de positions canoniques / LAMP: canonical position names
+LAMP_CANONICAL_TYPES = {
+    'F3', 'B3', 'F2', 'F1', 'B1', 'B2',
+    'FLOOP', 'BLOOP', 'STEMF', 'STEMB', 'FIP', 'BIP'
+}
+# PCR : types canoniques (après résolution des alias) / PCR: canonical types (after alias resolution)
+PCR_CANONICAL_TYPES = {'F', 'R', 'P'}
+
+
+def get_base_type(primer_id, is_pcr=False):
+    """
+    Retourne le type de base d'une amorce en supprimant le suffixe numérique de version.
+    Ex : F31 → F3, P2 → P, FLOOP3 → FLOOP.
+    Si le suffixe ne correspond pas à un type canonique, retourne le nom original.
+
+    Returns the base type of a primer by stripping the numeric version suffix.
+    E.g.: F31 → F3, P2 → P, FLOOP3 → FLOOP.
+    If the stripped name is not a canonical type, returns the original name.
+    """
+    canonical = PCR_CANONICAL_TYPES if is_pcr else LAMP_CANONICAL_TYPES
+    stripped = primer_id.rstrip('0123456789')
+    if stripped != primer_id and stripped in canonical:
+        return stripped
+    return primer_id
+
+
+def group_primer_versions(primers_dict, is_pcr=False):
+    """
+    Groupe les amorces d'un set par leur type de base.
+    Ex : {'F31': seq, 'F32': seq, 'B3': seq} → {'F3': ['F31','F32'], 'B3': ['B3']}
+
+    Groups primers of a set by their base type.
+    E.g.: {'F31': seq, 'F32': seq, 'B3': seq} → {'F3': ['F31','F32'], 'B3': ['B3']}
+    """
+    groups = defaultdict(list)
+    for primer_id in primers_dict.keys():
+        base = get_base_type(primer_id, is_pcr)
+        groups[base].append(primer_id)
+    return dict(groups)
+
+
+def get_all_nonempty_subsets(lst):
+    """Retourne tous les sous-ensembles non-vides d'une liste sous forme de tuples triés."""
+    subsets = []
+    for r in range(1, len(lst) + 1):
+        for combo in itertools.combinations(lst, r):
+            subsets.append(tuple(sorted(combo)))
+    return subsets
+
+
+def find_best_subsets_by_pool(type_groups, primer_matches_set, max_exhaustive=50_000):
+    """
+    Calcule la meilleure combinaison d'amorces pour chaque taille de pool M,
+    de M_min (1 version par type) à M_max (toutes les versions de tous les types).
+    Si le nombre de combinaisons de sous-ensembles <= max_exhaustive: recherche exhaustive.
+    Sinon: algorithme glouton progressif.
+
+    Calculates the best primer combination for each pool size M,
+    from M_min (1 version per type) to M_max (all versions of all types).
+    If subset combinations count <= max_exhaustive: exhaustive search.
+    Otherwise: progressive greedy algorithm.
+    """
+    types = list(type_groups.keys())
+    
+    # Générer tous les sous-ensembles non-vides pour chaque type
+    subsets_by_type = {}
+    for t in types:
+        subsets_by_type[t] = get_all_nonempty_subsets(type_groups[t])
+        
+    # Calculer le nombre total de combinaisons de sous-ensembles
+    n_combos = 1
+    for t in types:
+        n_combos *= len(subsets_by_type[t])
+        
+    # Pré-calculer les unions de matchs pour chaque sous-ensemble pour accélérer
+    union_match = {}
+    for t in types:
+        union_match[t] = {}
+        for s in subsets_by_type[t]:
+            union_match[t][s] = set.union(*[primer_matches_set.get(v, set()) for v in s]) if s else set()
+
+    best_by_pool = {}  # M -> (best_combo: {type: tuple_of_versions}, best_coverage: set, algo: str)
+
+    if n_combos <= max_exhaustive:
+        # Recherche exhaustive parmi toutes les combinaisons de sous-ensembles
+        for combo_subsets in itertools.product(*[subsets_by_type[t] for t in types]):
+            m_size = sum(len(s) for s in combo_subsets)
+            match_sets = [union_match[types[i]][combo_subsets[i]] for i in range(len(types))]
+            coverage = set.intersection(*match_sets) if match_sets else set()
+            
+            if m_size not in best_by_pool or len(coverage) > len(best_by_pool[m_size][1]):
+                best_combo_dict = {types[i]: combo_subsets[i] for i in range(len(types))}
+                best_by_pool[m_size] = (best_combo_dict, coverage, 'exhaustive')
+    else:
+        # Algorithme glouton progressif (greedy forward selection)
+        # Étape 1 : M = n (1 version par type). Recherche exhaustive sur les tailles = 1 par type.
+        n_combos_1 = 1
+        for t in types:
+            n_combos_1 *= len(type_groups[t])
+            
+        best_combo_1 = {}
+        best_cov_1 = set()
+        
+        if n_combos_1 <= max_exhaustive:
+            v_lists = [type_groups[t] for t in types]
+            for combo_versions in itertools.product(*v_lists):
+                match_sets = [primer_matches_set.get(v, set()) for v in combo_versions]
+                coverage = set.intersection(*match_sets) if match_sets else set()
+                if len(coverage) > len(best_cov_1) or not best_combo_1:
+                    best_cov_1 = coverage
+                    best_combo_1 = {types[i]: (combo_versions[i],) for i in range(len(types))}
+        else:
+            chosen = []
+            for t in types:
+                best_v = max(type_groups[t], key=lambda v: len(primer_matches_set.get(v, set())))
+                chosen.append(best_v)
+            match_sets = [primer_matches_set.get(v, set()) for v in chosen]
+            best_cov_1 = set.intersection(*match_sets) if match_sets else set()
+            best_combo_1 = {types[i]: (chosen[i],) for i in range(len(types))}
+            
+        best_by_pool[len(types)] = (best_combo_1, best_cov_1, 'greedy')
+        
+        # Étapes suivantes : M de n+1 à sum(|V_t|)
+        curr_combo = {t: list(best_combo_1[t]) for t in types}
+        m_start = len(types)
+        m_max = sum(len(type_groups[t]) for t in types)
+        
+        for m in range(m_start + 1, m_max + 1):
+            best_candidate_combo = None
+            best_candidate_cov = None
+            best_candidate_len = -1
+            
+            for t in types:
+                if len(curr_combo[t]) < len(type_groups[t]):
+                    for v in type_groups[t]:
+                        if v not in curr_combo[t]:
+                            cand_combo = {type_name: list(versions) for type_name, versions in curr_combo.items()}
+                            cand_combo[t].append(v)
+                            
+                            match_sets = []
+                            for tn, vers in cand_combo.items():
+                                union_set = set.union(*[primer_matches_set.get(vi, set()) for vi in vers])
+                                match_sets.append(union_set)
+                            cov = set.intersection(*match_sets) if match_sets else set()
+                            
+                            if len(cov) > best_candidate_len:
+                                best_candidate_len = len(cov)
+                                best_candidate_cov = cov
+                                best_candidate_combo = {tn: tuple(sorted(vers)) for tn, vers in cand_combo.items()}
+                                
+            if best_candidate_combo:
+                best_by_pool[m] = (best_candidate_combo, best_candidate_cov, 'greedy')
+                curr_combo = {t: list(best_candidate_combo[t]) for t in types}
+            else:
+                break
+                
+    return best_by_pool, n_combos
+
+
+def analyze_marginal_value(type_groups, primer_matches_set):
+    """
+    Calcule pour chaque type d'amorce multi-versions la couverture optimale pour k versions,
+    lorsque tous les autres types d'amorces utilisent toutes leurs versions.
+
+    Calculates for each multi-version primer type the optimal coverage for k versions,
+    when all other primer types use all of their versions.
+    """
+    types = list(type_groups.keys())
+    
+    # U_{-t} = intersection_{t' != t} (union_{v' in V_{t'}} matches(v'))
+    unions_other = {}
+    for t in types:
+        other_unions = []
+        for t_other in types:
+            if t_other != t:
+                u = set.union(*[primer_matches_set.get(v, set()) for v in type_groups[t_other] if primer_matches_set.get(v) is not None])
+                other_unions.append(u)
+        unions_other[t] = set.intersection(*other_unions) if other_unions else None
+
+    marginal_by_type = {}
+    
+    for t in types:
+        versions = type_groups[t]
+        if len(versions) <= 1:
+            continue
+            
+        marginal_by_type[t] = []
+        u_other = unions_other[t]
+        
+        for k in range(1, len(versions) + 1):
+            best_subset = None
+            best_cov = set()
+            best_len = -1
+            
+            for subset in itertools.combinations(versions, k):
+                u_subset = set.union(*[primer_matches_set.get(v, set()) for v in subset if primer_matches_set.get(v) is not None])
+                if u_other is not None:
+                    cov = u_subset.intersection(u_other)
+                else:
+                    cov = u_subset
+                    
+                if len(cov) > best_len or best_subset is None:
+                    best_len = len(cov)
+                    best_cov = cov
+                    best_subset = tuple(sorted(subset))
+                    
+            marginal_by_type[t].append((k, best_subset, best_cov))
+            
+    return marginal_by_type
+
+
+
 def seq_to_regex(seq):
     """Convertit une séquence avec codes IUPAC en expression régulière."""
+
     pattern = ""
     for char in seq.upper():
         if char.isalpha():
@@ -153,6 +371,10 @@ def load_primers(filepath, is_pcr=False):
                     seq = "".join(c for c in seq if c.isalpha())
                     records.append({'id': name, 'seq': seq})
                     
+            # Initialisation de la liste de collecte pour gérer les doublons d'ID d'amorce
+            # Initialize collection list to handle duplicate primer IDs within the same set
+            collected = []
+
             for record in records:
                 if hasattr(record, 'id'):
                     name = record.id
@@ -162,12 +384,22 @@ def load_primers(filepath, is_pcr=False):
                     seq = record['seq'].upper()
                     
                 if '_' in name:
-                    # Découpage sur le DERNIER underscore pour associer les amorces entre elles
-                    # Split on the LAST underscore to group primers by set
-                    # Ex: "SetA_Dengue2_F3" → set_id="SetA_Dengue2", primer_id="F3"
                     parts = name.rsplit('_', 1)
-                    set_id = parts[0]
+                    set_id   = parts[0]
                     primer_id = parts[1]
+
+                    # NOUVEAU : si le dernier segment est un entier pur → numéro de version
+                    # NEW: if the last segment is a pure integer → version number
+                    # Ex: "SetA_F3_2" → set_id="SetA", primer_id="F3", version=2
+                    # La résolution des doublons (post-traitement ci-dessous) gérera le renommage
+                    # Duplicate resolution (post-processing below) will handle renaming
+                    if primer_id.isdigit():
+                        inner = set_id.rsplit('_', 1)
+                        if len(inner) == 2:
+                            set_id    = inner[0]
+                            primer_id = inner[1]  # vrai type d'amorce / actual primer type
+                        # Sinon : set_id court, garder les parties telles quelles
+                        # Otherwise: short set_id, keep parts as-is
                 else:
                     set_id = "Default"
                     primer_id = name
@@ -216,13 +448,29 @@ def load_primers(filepath, is_pcr=False):
                 if resolved is not None:
                     primer_id = resolved
                 # Sinon, on conserve le nom original / Otherwise keep original name
-                    
-                primer_sets[set_id][primer_id] = seq
-                
+
+                # Collecter pour post-traitement des doublons / Collect for duplicate post-processing
+                collected.append((set_id, primer_id, seq))
+
+            # Post-traitement : renommer les doublons d'ID au sein du même set
+            # Ex : P, P → P1, P2 ; R, R → R1, R2 (sondes/amorces multiples)
+            # Post-processing: rename duplicate IDs within the same set
+            # E.g.: P, P → P1, P2 ; R, R → R1, R2 (multiple probes/primers)
+            id_count = Counter((s, p) for s, p, _ in collected)
+            id_seen  = defaultdict(int)
+            for s_id, p_id, p_seq in collected:
+                key = (s_id, p_id)
+                if id_count[key] > 1:
+                    id_seen[key] += 1
+                    final_id = f"{p_id}{id_seen[key]}"
+                else:
+                    final_id = p_id
+                primer_sets[s_id][final_id] = p_seq
+
     except Exception as e:
         print(f"Error reading primers file / Erreur lecture fichier amorces : {e}")
         sys.exit(1)
-        
+
     return primer_sets
 
 def auto_split_fip_bip(primer_sets, targets, txt):
@@ -325,9 +573,9 @@ def main():
     parser.add_argument("-e", "--errors", type=int, default=0, help="Nombre max d'erreurs hors zone 3' / Max errors outside 3' region. Def: 0")
     parser.add_argument("-s", "--strict-3prime", type=int, default=3, dest="strict_3prime", help="Taille zone 3' stricte / Strict 3' region size. Def: 3")
     parser.add_argument("--strict-3prime-tolerate", type=int, choices=[0, 1, 2], default=0, help="Niveau de tolérance en zone 3' (0: tout strict, 1: pos 2 tolérée, 2: pos 1 et 2 tolérées). / Tolerance level in the 3' region (0: all strict, 1: pos 2 tolerated, 2: pos 1 and 2 tolerated).")
-    parser.add_argument("--strict-intersection", action="store_true", help="Exige que toutes les amorces du fichier matchent la cible (comportement strict historique). / Requires all primers in the file to match the target (historical strict behavior).")
-    parser.add_argument("--max-n-run", type=int, default=5, dest="max_n_run",
-        help="Exclure les séquences ayant un run de N consécutifs égal ou supérieur à cette valeur / Exclude sequences with a run of consecutive N's >= this value. 0 = désactivé/disabled. Def: 5")
+    parser.add_argument("--strict-intersection", action="store_true", help="Exige que toutes les amorces du fichier matchent la cible. / Requires all primers in the file to match the target.")
+    parser.add_argument("--max-n-pct", type=float, default=5.0, dest="max_n_pct",
+        help="Exclure les séquences dont le pourcentage de N dépasse ce seuil / Exclude sequences with N percentage above this threshold. 0=désactivé/disabled. Def: 5.0")
     
     # Options de sortie
     parser.add_argument("--summary-only", action="store_true", help="N'affiche que les statistiques / Output only summary statistics.")
@@ -364,7 +612,7 @@ def main():
             'global_raw': "Match Global du Set (Intersection Brute, toutes amorces présentes)",
             'global_base': "Match de Base du Set (Intersection Validation : amorces essentielles uniquement)",
             'global_valid': "Match Global Valide (Intersection Base + Ordre Correct structurel LAMP)",
-            'excluded_label': "Séquences de mauvaise qualité exclues (run de N ≥ {})",
+            'excluded_label': "Séquences de mauvaise qualité exclues (>{}% de N)",
             'total_analysed': "Total de séquences analysées",
             'amplified_seqs': "Séquences amplifiées théoriquement par le Set {} :",
             'table_header': "Séquence_ID\tTaille_Amplicon\tStatut_Ordre\tOrdre_Observe",
@@ -380,6 +628,12 @@ def main():
             'seqs_word': "séquences",
             'split_success': "Auto-split réussi pour Set {} ({}) -> {} et {} (linker de {} nt ignoré).",
             'split_fail': "Attention : Impossible de déterminer la coupe automatique pour Set {} ({}).",
+            'type_union_label':  "Union",
+            'marginal_title':     "Valeur ajoutée par version supplémentaire (par type) :",
+            'pool_title':         "Meilleures combinaisons selon le nombre total d'amorces (pool size) :",
+            'pool_tested':        "combinaison(s) de sous-ensembles testée(s)",
+            'pool_exhaustive':    "recherche exhaustive",
+            'pool_greedy':        "algorithme glouton progressif",
         },
         'en': {
             'target_load': "Loading target sequences...",
@@ -402,7 +656,7 @@ def main():
             'global_raw': "Set Global Match (Raw Intersection, all primers present)",
             'global_base': "Set Base Match (Validation Intersection: essential primers only)",
             'global_valid': "Set Valid Global Match (Base Intersection + Structurally Correct LAMP Order)",
-            'excluded_label': "Bad quality sequences excluded (N-run >= {})",
+            'excluded_label': "Bad quality sequences excluded (>{}% N)",
             'total_analysed': "Total sequences analysed",
             'amplified_seqs': "Theoretically amplified sequences by Set {} :",
             'table_header': "Sequence_ID\tAmplicon_Size\tOrder_Status\tObserved_Order",
@@ -418,6 +672,12 @@ def main():
             'seqs_word': "sequences",
             'split_success': "Auto-split successful for Set {} ({}) -> {} and {} ({} nt linker ignored).",
             'split_fail': "Warning: Could not automatically determine split for Set {} ({}).",
+            'type_union_label':  "Union",
+            'marginal_title':     "Marginal value added per additional version:",
+            'pool_title':         "Best combinations by total number of primers (pool size):",
+            'pool_tested':        "subset combination(s) tested",
+            'pool_exhaustive':    "exhaustive search",
+            'pool_greedy':        "progressive greedy algorithm",
         }
     }
     
@@ -425,12 +685,12 @@ def main():
     if args.pcr:
         if lang == 'fr':
             txt['report_title'] = "Rapport de Couverture des Amorces PCR"
-            txt['global_base']  = "Match de Base du Set (Intersection Validation : amorces essentielles uniquement)"
-            txt['global_valid'] = "Match Global Valide (Intersection Base + Ordre PCR Correct)"
+            txt['global_base']  = "Couverture Validation PCR (F∪ ∩ R∪ ∩ Sondes∪)"
+            txt['global_valid'] = "Match Global Valide (Validation + Ordre PCR Correct)"
         else:
             txt['report_title'] = "PCR Primer Coverage Report"
-            txt['global_base']  = "Set Base Match (Validation Intersection: essential primers only)"
-            txt['global_valid'] = "Set Valid Global Match (Base Intersection + Structurally Correct PCR Order)"
+            txt['global_base']  = "PCR Validation Coverage (F∪ ∩ R∪ ∩ Probes∪)"
+            txt['global_valid'] = "Set Valid Global Match (Validation + Correct PCR Order)"
     
     print(txt['target_load'])
     targets = {}
@@ -443,9 +703,10 @@ def main():
             colour="cyan"
         ))
         for record in all_records:
-            clean_seq = str(record.seq).upper().replace('-', '')
+            raw_seq   = str(record.seq).upper()
+            clean_seq = raw_seq.replace('-', '')
             if len(clean_seq) > 100:
-                targets[record.description] = clean_seq
+                targets[record.description] = clean_seq   # Sans gaps / Without gaps (for matching)
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)
@@ -456,11 +717,23 @@ def main():
         sys.exit(1)
     print(f"{total_targets} {txt['target_loaded']}")
 
-    # Compilation du pattern N-run pour le filtre qualité par set (utilisé dans la boucle de matching)
-    # Compile N-run pattern for per-set quality filter (used in the matching loop)
-    n_run_pattern = None
-    if args.max_n_run > 0:
-        n_run_pattern = re.compile(r'N{' + str(args.max_n_run) + r',}', re.IGNORECASE)
+    # Pré-filtre qualité : exclut les séquences dont le % de N dépasse le seuil
+    # Quality pre-filter: exclude sequences whose N percentage exceeds the threshold
+    n_excluded = 0
+    if args.max_n_pct > 0:
+        bad_qual = {sid for sid, seq in targets.items()
+                    if seq.count('N') / len(seq) * 100 > args.max_n_pct}
+        n_excluded = len(bad_qual)
+        if n_excluded > 0:
+            targets = {sid: seq for sid, seq in targets.items() if sid not in bad_qual}
+            if lang == 'fr':
+                print(f"  ⚠️  {n_excluded} séquence(s) exclues (>  {args.max_n_pct}% de N dans la séquence).")
+            else:
+                print(f"  ⚠️  {n_excluded} sequence(s) excluded (> {args.max_n_pct}% N in sequence).")
+        total_targets = len(targets)
+        if total_targets == 0:
+            print(txt['target_err'])
+            sys.exit(1)
     
     print(txt['primer_load'])
     primer_sets = load_primers(args.primers, is_pcr=args.pcr)
@@ -497,45 +770,24 @@ def main():
     
     primer_matches = defaultdict(lambda: defaultdict(set))
     primer_positions = defaultdict(lambda: defaultdict(dict))
-    # Séquences exclues par set (mauvaise qualité dans les zones de fixation)
-    # Excluded sequences per set (bad quality in binding regions)
-    bad_seqs_per_set = defaultdict(set)
+    bad_seqs_per_set = defaultdict(set)  # inutilisé ici mais conservé pour compatibilité / kept for compatibility
 
-    # Boucle principale d'analyse avec barre de progression tqdm
-    # Main analysis loop with tqdm progress bar
+    # Boucle principale d'analyse / Main analysis loop
     total_steps = len(primer_sets) * len(targets)
     bar_label = "🔬 Analyse" if args.lng == 'fr' else "🔬 Analysing"
 
     with tqdm(total=total_steps, desc=bar_label, unit=" seq", colour="green") as pbar:
         for set_id, primers in primer_sets.items():
             for seq_id, seq in targets.items():
-                seq_has_bad_region = False
-                temp_matches = {}  # Stockage temporaire des matchs / Temporary match storage
                 for primer_id, primer_seq in primers.items():
                     pos = primer_matches_sequence(seq, primer_seq, args.errors, args.strict_3prime, args.strict_3prime_tolerate)
                     if pos:
-                        # Vérification N-run dans la zone de fixation de l'amorce
-                        # Check for N-run in the primer binding region
-                        if n_run_pattern is not None:
-                            matched_region = seq[pos[0]:pos[1]]
-                            if n_run_pattern.search(matched_region):
-                                seq_has_bad_region = True
-                                break  # Inutile de continuer / No need to continue
-                        temp_matches[primer_id] = pos
-
-                # Si une zone de fixation contient des N consécutifs, exclure la séquence pour ce set
-                # If a binding region contains consecutive N's, exclude the sequence for this set
-                if seq_has_bad_region:
-                    bad_seqs_per_set[set_id].add(seq_id)
-                else:
-                    # Enregistrer les matchs valides / Record valid matches
-                    for primer_id, pos in temp_matches.items():
                         primer_matches[set_id][primer_id].add(seq_id)
                         primer_positions[set_id][seq_id][primer_id] = pos
-
                 pbar.update(1)
-                # Affiche le set en cours dans la barre / Show current set in bar
                 pbar.set_postfix_str(f"Set {set_id}")
+
+
 
     print(txt['report_gen'])
     
@@ -582,13 +834,12 @@ def main():
             for set_id, primers in primer_sets.items():
                 out.write(txt['set_title'].format(set_id) + "\n")
 
-                # Nombre de séquences exclues pour ce set / Number of excluded sequences for this set
-                set_n_excluded = len(bad_seqs_per_set.get(set_id, set()))
-                effective_targets = total_targets - set_n_excluded
+                # Nombre de séquences exclues (global) / Number of excluded sequences (global)
+                effective_targets = total_targets  # ici, exclusion globale / global exclusion here
 
                 # Affichage des exclusions de mauvaise qualité / Display of quality exclusions
-                if args.max_n_run > 0:
-                    out.write(f"{txt['excluded_label'].format(args.max_n_run)} : {set_n_excluded}\n")
+                if args.max_n_pct > 0:
+                    out.write(f"{txt['excluded_label'].format(args.max_n_pct)} : {n_excluded}\n")
                     out.write(f"{txt['total_analysed']} : {effective_targets}\n")
 
                 set_matches_list = []
@@ -600,84 +851,169 @@ def main():
                     match_pct = (len(matches) / denom) * 100
                     out.write(f"  - {primer_id} : {match_pct:.2f}% ({len(matches)}/{effective_targets})\n")
                 
-                # Intersection brute (toutes les amorces présentes matchent)
-                # Raw intersection (all present primers must match)
-                if set_matches_list:
-                    intersection_matches = set.intersection(*set_matches_list)
-                else:
-                    intersection_matches = set()
-                    
-                # Détermination des amorces essentielles présentes dans le set d'amorces
-                # Determination of essential primers present in the primer set
+                # ── Groupement par type de base (multi-versions) ───────────────────────
+                # Group by base type (multi-version support)
+                # Ex: {F3: [F31, F32], B3: [B3], FIP: [FIP1, FIP2, FIP3]}
+                type_groups = group_primer_versions(primers, args.pcr)
+
+                # ── Union de chaque type d'amorce ─────────────────────────────────────
+                # Union per primer type: a sequence is covered if ≥1 version of that type detects it
+                type_unions = {}
+                for base_type, versions in type_groups.items():
+                    union_seqs = set.union(*[primer_matches[set_id][v] for v in versions if primer_matches[set_id].get(v) is not None])
+                    type_unions[base_type] = union_seqs
+
+                    # Afficher l'union si plusieurs versions existent pour ce type
+                    # Display the union if multiple versions exist for this type
+                    if len(versions) > 1:
+                        u_pct = (len(union_seqs) / denom) * 100
+                        names = '+'.join(versions)
+                        out.write(f"  \u2192 {txt['type_union_label']} {base_type} ({names}) : {u_pct:.2f}% ({len(union_seqs)}/{effective_targets})\n")
+
+                # ── Intersection brute (toutes amorces individuellement) ───────────────
+                # Raw intersection (all individual primers must match)
+                intersection_matches = set.intersection(*set_matches_list) if set_matches_list else set()
+
+                # ── Couverture poolée (union par type, intersection des types) ─────────
+                # Pooled coverage (union per type, then intersect across types)
                 if args.pcr:
-                    essential_in_set = [p for p in primers.keys() if p in ESSENTIAL_PCR]
+                    # PCR : types essentiels = F, R (P optionnel mais inclus s'il existe)
+                    # PCR: essential types = F, R (P optional but included if present)
+                    essential_types = [t for t in type_groups if t in PCR_CANONICAL_TYPES]
+                    if not essential_types:
+                        essential_types = list(type_groups.keys())
                 else:
-                    essential_in_set = [p for p in primers.keys() if p in ESSENTIAL_LAMP]
-                    
-                # Fallback sur toutes les amorces s'il n'y a pas d'essentielles identifiées
-                # Fallback to all primers if no essential primers are identified
-                if not essential_in_set:
-                    essential_in_set = list(primers.keys())
-                    
-                # Intersection essentielle (uniquement sur les amorces essentielles présentes)
-                # Essential intersection (only on present essential primers)
-                essential_matches_list = [primer_matches[set_id][p] for p in essential_in_set]
-                if essential_matches_list:
-                    essential_intersection_matches = set.intersection(*essential_matches_list)
-                else:
-                    essential_intersection_matches = set()
-                    
-                # Sélection de l'intersection pour la validation (brute ou essentielle)
-                # Selection of the intersection for validation (raw or essential)
+                    # LAMP : types essentiels = {F3,B3,F2,F1,B1,B2,FIP,BIP} ∩ types présents
+                    # LAMP: essential types = {F3,B3,F2,F1,B1,B2,FIP,BIP} ∩ present types
+                    essential_types = [t for t in type_groups if t in ESSENTIAL_LAMP]
+                    if not essential_types:
+                        essential_types = list(type_groups.keys())
+
+                essential_union_list = [type_unions[t] for t in essential_types]
+
                 if args.strict_intersection:
                     validation_matches = intersection_matches
                 else:
-                    validation_matches = essential_intersection_matches
-                    
+                    validation_matches = set.intersection(*essential_union_list) if essential_union_list else set()
+
+                # ── Vérification de l'ordre et calcul de la taille de l'amplicon ──────
+                # Order verification and amplicon size calculation
                 valid_order_matches = []
                 seq_details = []
-                
-                # Vérification de l'ordre et calcul de la taille de l'amplicon
-                # Order verification and amplicon size calculation
+
                 for seq_id in validation_matches:
                     positions = primer_positions[set_id][seq_id]
-                    
+
                     # Tri des noms d'amorces selon la coordonnée de départ
+                    # Sort primers by their start position on the target
                     sorted_primers = sorted(positions.keys(), key=lambda p: positions[p][0])
-                    
-                    expected_sense = [p for p in MASTER_ORDER if p in positions]
-                    expected_anti = [p for p in MASTER_ORDER_RC if p in positions]
-                    
-                    is_correct_order = (sorted_primers == expected_sense) or (sorted_primers == expected_anti)
-                    
+
+                    if args.pcr:
+                        # Vérification par type PCR : F < P(s) < R
+                        # PCR type-based order check: F < probe(s) < R
+                        type_seq = [get_base_type(p, is_pcr=True) for p in sorted_primers]
+                        if len(type_seq) >= 2:
+                            first_t, last_t = type_seq[0], type_seq[-1]
+                            middle_t = type_seq[1:-1]
+                            is_correct_order = (
+                                (first_t == 'F' and last_t == 'R' and all(t == 'P' for t in middle_t)) or
+                                (first_t == 'R' and last_t == 'F' and all(t == 'P' for t in middle_t))
+                            )
+                        else:
+                            is_correct_order = False
+                    else:
+                        # LAMP : remapper les versions vers leur type de base pour la vérification d'ordre
+                        # LAMP: remap versioned primers to their base type for order check
+                        base_type_pos = {}
+                        for p, pos in positions.items():
+                            bt = get_base_type(p, is_pcr=False)
+                            # Si plusieurs versions matchent, garder la position la plus en 5'
+                            # If multiple versions match, keep the most 5' position
+                            if bt not in base_type_pos or pos[0] < base_type_pos[bt][0]:
+                                base_type_pos[bt] = pos
+                        sorted_base_types = sorted(base_type_pos.keys(), key=lambda t: base_type_pos[t][0])
+                        expected_sense = [p for p in MASTER_ORDER if p in base_type_pos]
+                        expected_anti  = [p for p in MASTER_ORDER_RC if p in base_type_pos]
+                        is_correct_order = (sorted_base_types == expected_sense) or (sorted_base_types == expected_anti)
+
                     if is_correct_order:
                         valid_order_matches.append(seq_id)
-                        
+
                     starts = [pos[0] for pos in positions.values()]
-                    ends = [pos[1] for pos in positions.values()]
+                    ends   = [pos[1] for pos in positions.values()]
                     amplicon_size = max(ends) - min(starts)
-                    
+
                     status = txt['order_correct'] if is_correct_order else txt['order_incorrect']
                     observed_order = "-".join(sorted_primers)
                     seq_details.append((seq_id, amplicon_size, status, observed_order))
-                    
+
                 # Sauvegarde pour combine
                 valid_sequences_per_set[set_id] = set(valid_order_matches)
-                
-                # Calcul des pourcentages (sur le nombre effectif de séquences analysées pour ce set)
-                # Percentage calculation (based on effective number of sequences analysed for this set)
-                raw_match_pct   = (len(intersection_matches)   / denom) * 100
-                base_match_pct  = (len(validation_matches)     / denom) * 100
-                valid_match_pct = (len(valid_order_matches)    / denom) * 100 if denom > 0 else 0
-                
-                # Affichage : Brut (toutes amorces) > Base (essentielles) ≥ Valide (ordre)
-                # Display : Raw (all primers) ≥ Base (essentials) ≥ Valid (order)
+
+                # ── Calcul des pourcentages ────────────────────────────────────────────
+                # Percentage calculation
+                raw_match_pct   = (len(intersection_matches) / denom) * 100
+                val_match_pct   = (len(validation_matches)   / denom) * 100
+                valid_match_pct = (len(valid_order_matches)  / denom) * 100 if denom > 0 else 0
+
+                # ── Affichage statistiques ────────────────────────────────────────────
+                # Statistics display
+                has_multi_versions = any(len(vs) > 1 for vs in type_groups.values())
+
                 out.write(f"\n{txt['global_raw']} : {raw_match_pct:.2f}% ({len(intersection_matches)}/{effective_targets})\n")
-                # N'afficher la ligne Base que si elle diffère du Brut (i.e. mode relaxé avec amorces optionnelles)
-                # Only show Base line if it differs from Raw (i.e. relaxed mode with optional primers)
+                # Couverture poolée (union par type) — affichée si différente du brut
+                # Pooled coverage (union per type) — shown if different from raw
                 if validation_matches != intersection_matches:
-                    out.write(f"{txt['global_base']} : {base_match_pct:.2f}% ({len(validation_matches)}/{effective_targets})\n")
+                    out.write(f"{txt['global_base']} : {val_match_pct:.2f}% ({len(validation_matches)}/{effective_targets})\n")
                 out.write(f"{txt['global_valid']} : {valid_match_pct:.2f}% ({len(valid_order_matches)}/{effective_targets})\n")
+
+                # ── Analyse combinatoire (uniquement si multi-versions) ───────────────
+                # Combinatorial analysis (only if multi-version types exist)
+                if has_multi_versions:
+                    # 1. Progression marginale par type
+                    marginal_data = analyze_marginal_value(type_groups, dict(primer_matches[set_id]))
+                    if marginal_data:
+                        out.write(f"\n{txt['marginal_title']}\n")
+                        for base_type, steps in sorted(marginal_data.items()):
+                            out.write(f"  Type {base_type} :\n")
+                            prev_cov_len = 0
+                            for k, subset, cov_set in steps:
+                                pct = (len(cov_set) / denom) * 100
+                                gain_pct = ((len(cov_set) - prev_cov_len) / denom) * 100 if k > 1 else 0
+                                gain_str = f" (+{gain_pct:.2f}%)" if k > 1 else ""
+                                versions_str = "+".join(subset)
+                                out.write(f"    {k} version(s) : {versions_str} \u2192 {pct:.2f}% ({len(cov_set)}/{effective_targets}){gain_str}\n")
+                                prev_cov_len = len(cov_set)
+
+                    # 2. Combinaisons optimales par taille de pool
+                    best_by_pool, n_combos = find_best_subsets_by_pool(
+                        type_groups, dict(primer_matches[set_id])
+                    )
+                    out.write(f"\n{txt['pool_title']}\n")
+                    algo_label = txt['pool_exhaustive'] if n_combos <= 50_000 else txt['pool_greedy']
+                    out.write(f"  ({n_combos} {txt['pool_tested']}, {algo_label}) :\n")
+                    
+                    prev_cov_len = 0
+                    for m in sorted(best_by_pool.keys()):
+                        combo_dict, cov_set, step_algo = best_by_pool[m]
+                        pct = (len(cov_set) / denom) * 100
+                        gain_pct = ((len(cov_set) - prev_cov_len) / denom) * 100 if m > len(type_groups) else 0
+                        gain_str = f" (+{gain_pct:.2f}%)" if m > len(type_groups) else ""
+                        
+                        combo_parts = []
+                        for bt in sorted(combo_dict.keys()):
+                            versions = combo_dict[bt]
+                            if len(versions) > 1:
+                                combo_parts.append(f"{bt}=[{'+'.join(versions)}]")
+                            else:
+                                combo_parts.append(f"{bt}={versions[0]}")
+                        combo_str = " + ".join(combo_parts)
+                        
+                        out.write(f"  - Pool de {m} amorce(s) : {combo_str} \u2192 {pct:.2f}% ({len(cov_set)}/{effective_targets}){gain_str}\n")
+                        prev_cov_len = len(cov_set)
+
+
+
                 
                 # 1. Option : Ne pas afficher les séquences (si --summary-only)
                 if not args.summary_only:
