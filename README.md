@@ -39,11 +39,15 @@ This suite of Python scripts provides a modular, command-line pipeline to:
 - ✅ **Supports all genome sizes** — efficient regex-based search
 - ✅ **Degenerate/IUPAC bases** — handles `N`, `R`, `Y`, `W`, `S`, `M`, `K`, `B`, `D`, `H`, `V` automatically
 - ✅ **Error tolerance** — configurable number of mismatches/indels
+- ✅ **ARMS / 3' Tolerance** — configurable 3' mismatch tolerance (strict or 1-2 mismatches allowed at positions -1/-2)
 - ✅ **Reverse complement search** — searches both strands; antisense primers are auto-detected and renamed with `+c`
 - ✅ **MSA-compatible** — injects gaps into primers to preserve alignment columns
 - ✅ **Dimer detection** — hairpin, homodimer, and heterodimer analysis via `ntthal`
-- ✅ **LAMP coverage** — evaluates per-sequence coverage with strict 3' zone validation
-- ✅ **Combinatorial mode** — tests all pairwise combinations of primer sets for coverage
+- ✅ **LAMP & PCR coverage** — evaluates per-sequence coverage with strict 3' zone validation and correct structural order check
+- ✅ **Relaxed intersection** — loop and stem primers are optional in LAMP mode by default; check the physical alignment order with `Ordre_Observe`
+- ✅ **Quality filtering** — auto-excludes low-quality sequences exceeding a given percentage of `N` (replaces `--max-n-run`)
+- ✅ **Multi-probe & Multi-version** — supports multiple probes in PCR and multiple versions (variants) of any primer type
+- ✅ **Subset Combinatorics** — calculates marginal value of adding versions and finds optimal primer pools of size $M$
 - ✅ **Multilingual** — reports available in French (`fr`) and English (`en`)
 - ✅ **Modular pipeline** — run all steps or only the ones you need with `--steps`
 
@@ -126,13 +130,16 @@ python3 primer_analyse.py -t <target.fasta> -p <primers.txt> [options]
 | `--lng` | | Report language (`fr` or `en`) | `fr` |
 | `--steps` | | Steps to run: `align`, `dimers`, `lamp` | all three |
 
-#### LAMP Coverage Options (`--steps lamp`)
+#### LAMP & PCR Coverage Options (`--steps lamp`)
 
 | Argument | Short | Description | Default |
 |---|---|---|---|
 | `--strict-3prime` | `-s` | Size of the strict 3' region (no errors allowed) | `3` |
+| `--strict-3prime-tolerate` | | ARMS tolerance level (0: all strict, 1: pos 2 tolerated, 2: pos 1 & 2 tolerated) | `0` |
+| `--strict-intersection` | | Require all primers in the set to match the target (no optional primers) | off |
+| `--max-n-pct` | | Exclude sequences with N percentage above this threshold | `5.0` |
 | `--summary-only` | | Output only summary statistics | off |
-| `--combine` | | Test all pairwise primer set combinations | off |
+| `--combine` | | Test all pairwise combinations of primer sets | off |
 | `--export-seqs` | | Export validated sequences per primer set | off |
 | `--pcr` | | Switch to PCR mode (instead of LAMP) | off |
 
@@ -199,11 +206,36 @@ python3 lamp_coverage.py -t <sequences.fasta> -p <primers.txt> -o <report.txt> [
 - `-o` / `--output` : Output report file
 - `-e` / `--errors` : Max mismatches outside strict 3' zone (default: `2`)
 - `-s` / `--strict-3prime` : Size of the strict 3' region (no errors, default: `3`)
+- `--strict-3prime-tolerate` : Mismatch tolerance in strict 3' zone (0: strict, 1: pos 2 tolerated, 2: pos 1 & 2 tolerated)
+- `--strict-intersection` : Require all primers in the file to match the target (reverts default relaxed mode)
+- `--max-n-pct` : Exclude low-quality sequences with N percentage above this threshold (default: `5.0`)
 - `--combine` : Test pairwise combinations of primer sets
 - `--summary-only` : Only output summary stats (no per-sequence detail)
 - `--export-seqs` : Export sequences passing each primer set to separate files
 - `--pcr` : Use PCR mode
 - `--lng` : Language of report (`fr` or `en`)
+
+---
+
+### 🧬 Multi-probe, Multi-version & Subset Combinatorics
+
+If your primers file contains multiple versions of a primer type or multiple probes (crucial to capture viral population diversity), you can name them using the following format:
+```
+>{SetID}_{PrimerType}_{VersionNumber}
+```
+Example:
+```
+>Ibrahim_et_al_2010_Probe_1
+TTTTTTTTTTGCGCGCGCGCGCGCGCGCG
+>Ibrahim_et_al_2010_Probe_2
+ATATATATATCATGCATGCATGCATGC
+```
+
+When multi-version primers are detected, `lamp_coverage.py` automatically performs two advanced combinatorial analyses:
+1. **Marginal value added per additional version**: Evaluates the coverage progression when adding versions one by one (e.g. `P1`, then `P1+P2`, then `P1+P2+P3`) to see if adding more variants actually increases the population coverage.
+2. **Best combinations by pool size**: Evaluates the absolute best subset combination of primers for each total pool size $M$ (e.g. the best pool of 3 primers, the best pool of 4 primers, etc.) to help you design a minimal multiplex assay.
+
+See [README_naming.md](file:///Users/cheikhtalibouya/Documents/alignement%20sequence/README_naming.md) for more details.
 
 ---
 
