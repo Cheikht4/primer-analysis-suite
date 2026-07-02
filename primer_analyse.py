@@ -38,8 +38,13 @@ def main():
     lamp_group.add_argument("--pcr", action="store_true", help="Mode PCR (lamp) / PCR mode")
     lamp_group.add_argument("--strict-intersection", action="store_true", help="Exige que toutes les amorces du fichier matchent la cible (lamp) / Requires all primers in the file to match the target")
     # Filtre par pourcentage global de N / Global N percentage filter
-    lamp_group.add_argument("--max-n-pct", type=float, default=5.0, dest="max_n_pct",
-        help="Exclure les séquences dont le pourcentage de N dépasse ce seuil / Exclude sequences with N percentage above this threshold. 0=désactivé/disabled. Def: 5.0")
+    lamp_group.add_argument("--max-n-pct", type=float, default=0, dest="max_n_pct",
+        help="Exclure les séquences dont le pourcentage de N dépasse ce seuil / Exclude sequences with N percentage above this threshold. 0=désactivé/disabled (défaut/default). Def: 0")
+    # Diagnostic des non-matches / Non-matching sequences diagnosis
+    lamp_group.add_argument("--diagnose-nonmatch", action="store_true", dest="diagnose_nonmatch",
+        help="Diagnostique les séquences non-matchées : qualité insuffisante vs vrai non-match. / Diagnose non-matching sequences: poor quality vs true non-match.")
+    lamp_group.add_argument("--diag-n-pct", type=float, default=5.0, dest="diag_n_pct",
+        help="Seuil de %% de N dans l'amplicon pour qualifier une séquence de mauvaise qualité (avec --diagnose-nonmatch). / N%% threshold in the amplicon to flag poor quality (with --diagnose-nonmatch). Def: 5.0")
 
     args = parser.parse_args()
     
@@ -132,6 +137,10 @@ def main():
             cmd_lamp.append("--strict-intersection")
         # Transmettre le filtre de pourcentage global de N / Pass the global N percentage filter
         cmd_lamp.extend(["--max-n-pct", str(args.max_n_pct)])
+        # Diagnostic des non-matches / Non-matching sequences diagnosis
+        if args.diagnose_nonmatch:
+            cmd_lamp.append("--diagnose-nonmatch")
+            cmd_lamp.extend(["--diag-n-pct", str(args.diag_n_pct)])
             
         subprocess.run(cmd_lamp)
         print()

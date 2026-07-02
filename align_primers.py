@@ -370,12 +370,32 @@ def main():
     # Construction du dictionnaire {nom: sequence} / Build {name: sequence} dict
     primers_dict = {p.id: str(p.seq).upper() for p in primers_list}
 
-    # La première séquence est la référence / First sequence is the reference
-    ref_record      = targets[0]
+    # Recherche de la meilleure séquence de référence (celle qui matche le plus de primers)
+    # Find the best reference sequence (the one matching the highest number of primers)
+    best_ref_idx = 0
+    best_match_count = -1
+    
+    print("\n🔍 Recherche de la meilleure séquence de référence pour l'alignement...")
+    for idx, rec in enumerate(targets):
+        ungapped_str, _ = get_ungapped_mapping(str(rec.seq).upper())
+        matches = 0
+        for p_seq in primers_dict.values():
+            if primer_matches_sequence_simple(ungapped_str, p_seq, max_errors=args.errors):
+                matches += 1
+        
+        if matches > best_match_count:
+            best_match_count = matches
+            best_ref_idx = idx
+            # Arrêt rapide si on trouve une séquence qui matche toutes les amorces
+            # Short-circuit if we find a sequence matching all primers
+            if matches == len(primers_dict):
+                break
+                
+    ref_record      = targets[best_ref_idx]
     ref_gapped_str  = str(ref_record.seq).upper()
     msa_len         = len(ref_gapped_str)
-    print(f"Séquence de référence : {ref_record.id} (Longueur MSA: {msa_len})")
-
+    print(f"Séquence de référence sélectionnée : {ref_record.id} (Matches: {best_match_count}/{len(primers_dict)}, Longueur MSA: {msa_len})")
+    
     # Mappage ungapped -> gapped pour la référence / ungapped -> gapped mapping
     ref_ungapped_str, ungapped_to_gapped = get_ungapped_mapping(ref_gapped_str)
 

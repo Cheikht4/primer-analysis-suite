@@ -250,6 +250,294 @@ def analyze_marginal_value(type_groups, primer_matches_set):
     return marginal_by_type
 
 
+def pigeonhole_search_simple(seq_upper, kmer, kmer_offset):
+    kmer_len = 18
+    max_kmer_err = 2
+    n_segments = 3
+    seg_len = 6
+    max_cands = 15
+    n = len(seq_upper)
+    for seg_i in range(n_segments):
+        seg_start_in_kmer = seg_i * seg_len
+        segment = kmer[seg_start_in_kmer : seg_start_in_kmer + seg_len]
+        cands = 0
+        hit = seq_upper.find(segment)
+        while hit >= 0 and cands < max_cands:
+            est_kmer_start = hit - seg_start_in_kmer
+            if 0 <= est_kmer_start <= n - kmer_len:
+                window = seq_upper[est_kmer_start : est_kmer_start + kmer_len]
+                mismatches = sum(a != b for a, b in zip(kmer, window))
+                if mismatches <= max_kmer_err:
+                    return max(0, est_kmer_start - kmer_offset)
+            cands += 1
+            hit = seq_upper.find(segment, hit + 1)
+    return None
+
+
+def extract_amplicon_region(seq_id, targets, gapped_targets, ref_seq_id, ref_seq, ref_gapped, amp_start, amp_end, amp_len, is_msa, mapping, blast_results, kmers):
+    # 1. Chemin MSA
+    if is_msa and mapping:
+        gapped_start = mapping[amp_start]
+        gapped_end   = mapping[amp_end - 1] + 1
+        seq_gapped = gapped_targets.get(seq_id, '')
+        if seq_gapped:
+            region_gapped = seq_gapped[gapped_start:gapped_end]
+            region = region_gapped.replace('-', '')
+            if region:
+                return region
+                
+    # 2. Chemin BLAST
+    if blast_results and seq_id in blast_results:
+        hit = blast_results[seq_id]
+        seq = targets.get(seq_id, '')
+        if seq:
+            if hit['sstart'] < hit['send']:
+                est_sstart = hit['sstart'] - (hit['qstart'] - 1)
+                est_send = hit['send'] + (amp_len - hit['qend'])
+            else:
+                est_sstart = hit['send'] - (hit['qstart'] - 1)
+                est_send = hit['sstart'] + (amp_len - hit['qend'])
+            s_start = max(0, est_sstart - 1)
+            s_end = min(len(seq), est_send)
+            region = seq[s_start:s_end]
+            if region:
+                return region
+
+    # 3. Chemin Pigeonhole
+    seq = targets.get(seq_id, '')
+    if seq and kmers:
+        seq_upper = seq.upper()
+        # Essai brin sens
+        for kmer_offset, kmer, _ in kmers:
+            amp_est = pigeonhole_search_simple(seq_upper, kmer, kmer_offset)
+            if amp_est is not None:
+                r_end = min(len(seq), amp_est + amp_len)
+                return seq[amp_est:r_end]
+        # Essai brin anti-sens
+        for kmer_offset, _, kmer_rc in kmers:
+            amp_est = pigeonhole_search_simple(seq_upper, kmer_rc, kmer_offset)
+            if amp_est is not None:
+                r_end = min(len(seq), amp_est + amp_len)
+                return seq[amp_est:r_end]
+                
+    return None
+
+
+def check_relaxed_primer_match(seq_amp, primer_seq):
+    # Convertit l'amorce en regex
+    pattern = seq_to_regex(primer_seq)
+    # Recherche avec max 6 erreurs
+    regex_pattern = f"(?e)({pattern}){{e<=6}}"
+    match = regex.search(regex_pattern, seq_amp, regex.BESTMATCH)
+    if match:
+        return True
+    
+    # Brin anti-sens
+    primer_rc = str(Seq(primer_seq).reverse_complement())
+    pattern_rc = seq_to_regex(primer_rc)
+    regex_rc_pattern = f"(?e)({pattern_rc}){{e<=6}}"
+    match_rc = regex.search(regex_rc_pattern, seq_amp, regex.BESTMATCH)
+    if match_rc:
+        return True
+        
+    return False
+
+
+def diagnose_nonmatching_sequences(
+    non_matched_ids, targets, gapped_targets, primers_dict, primer_positions, set_id,
+    valid_order_matches, is_pcr, max_n_pct_diag, primer_matches_set
+):
+    """
+    Diagnostique les séquences non-matchées à partir de la couverture des amorces et de l'alignement/BLAST.
+    
+    Classifie en:
+    - too_variable             : au moins 1 amorce se fixe (divergence réelle)
+    - truncated_poor_divergent : 0 amorce se fixe, région tronquée ou mauvaise qualité (>max_n_pct_diag % de N dans l'amplicon)
+    """
+    # ── Séquence de référence (premier match valide) pour l'amplicon ──
+    ref_seq_id = next(iter(valid_order_matches), None)
+    if ref_seq_id is None:
+        return {
+            'too_variable': [],
+            'truncated_poor_divergent': non_matched_ids,
+            'details': {sid: {'status': 'truncated_poor_divergent', 'matched': [], 'unmatched': {p: 'not_found' for p in primers_dict}} for sid in non_matched_ids},
+            'ref_amp_len': 0,
+            'method': 'Primer Binding Analysis'
+        }
+
+    ref_seq = targets.get(ref_seq_id, '')
+    ref_pos = primer_positions.get(set_id, {}).get(ref_seq_id, {})
+    if not ref_seq or not ref_pos:
+        return {
+            'too_variable': [],
+            'truncated_poor_divergent': non_matched_ids,
+            'details': {sid: {'status': 'truncated_poor_divergent', 'matched': [], 'unmatched': {p: 'not_found' for p in primers_dict}} for sid in non_matched_ids},
+            'ref_amp_len': 0,
+            'method': 'Primer Binding Analysis'
+        }
+
+    start_type = 'F' if is_pcr else 'F3'
+    end_type   = 'R' if is_pcr else 'B3'
+    amp_start, amp_end = None, None
+    for pid, pos in ref_pos.items():
+        bt = get_base_type(pid, is_pcr)
+        if bt == start_type and (amp_start is None or pos[0] < amp_start):
+            amp_start = pos[0]
+        if bt == end_type and (amp_end is None or pos[1] > amp_end):
+            amp_end = pos[1]
+
+    if amp_start is None:
+        starts = [p[0] for p in ref_pos.values()]
+        amp_start = min(starts) if starts else None
+    if amp_end is None:
+        ends = [p[1] for p in ref_pos.values()]
+        amp_end = max(ends) if ends else None
+
+    if amp_start is None or amp_end is None or amp_end <= amp_start:
+        return {
+            'too_variable': [],
+            'truncated_poor_divergent': non_matched_ids,
+            'details': {sid: {'status': 'truncated_poor_divergent', 'matched': [], 'unmatched': {p: 'not_found' for p in primers_dict}} for sid in non_matched_ids},
+            'ref_amp_len': 0,
+            'method': 'Primer Binding Analysis'
+        }
+
+    amp_len = amp_end - amp_start
+    ref_amp = ref_seq[amp_start:amp_end]
+
+    # Détection MSA
+    ref_gapped = gapped_targets.get(ref_seq_id, '')
+    ref_gapped_len = len(ref_gapped)
+    sample = list(non_matched_ids)[:30]
+    is_msa = ref_gapped_len > 0 and all(len(gapped_targets.get(sid, '')) == ref_gapped_len for sid in sample)
+
+    mapping = []
+    if is_msa:
+        for i, char in enumerate(ref_gapped):
+            if char != '-':
+                mapping.append(i)
+
+    # BLAST (si pas MSA)
+    blast_results = {}
+    if not is_msa:
+        import shutil
+        import tempfile
+        import subprocess
+        blastn_path = shutil.which("blastn") or "/opt/homebrew/bin/blastn"
+        if not os.path.exists(blastn_path):
+            blastn_path = "/usr/local/bin/blastn" if os.path.exists("/usr/local/bin/blastn") else None
+            
+        if blastn_path:
+            try:
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.fasta', delete=False) as q_file:
+                    q_file.write(f">ref\n{ref_amp}\n")
+                    q_path = q_file.name
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.fasta', delete=False) as s_file:
+                    for seq_id in non_matched_ids:
+                        seq = targets.get(seq_id, '')
+                        if seq:
+                            s_file.write(f">{seq_id}\n{seq}\n")
+                    s_path = s_file.name
+                cmd = [
+                    blastn_path, "-query", q_path, "-subject", s_path,
+                    "-outfmt", "6 sseqid pident length qstart qend sstart send gaps",
+                    "-perc_identity", "50"
+                ]
+                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                if proc.returncode == 0:
+                    for line in proc.stdout.strip().split("\n"):
+                        if not line: continue
+                        parts = line.split("\t")
+                        if len(parts) >= 8:
+                            sseqid, pident, aln_len, qstart, qend, sstart, send = parts[0], float(parts[1]), int(parts[2]), int(parts[3]), int(parts[4]), int(parts[5]), int(parts[6])
+                            qcov = (qend - qstart + 1) / amp_len * 100
+                            if qcov >= 50.0:
+                                if sseqid not in blast_results or qcov > blast_results[sseqid]['qcov']:
+                                    blast_results[sseqid] = {
+                                        'sstart': sstart, 'send': send, 'qstart': qstart, 'qend': qend, 'qcov': qcov
+                                    }
+                os.remove(q_path)
+                os.remove(s_path)
+            except:
+                pass
+
+    # Kmers Pigeonhole
+    kmers = []
+    for i in range(8):
+        offset = (amp_len * i) // 9
+        pos = amp_start + offset
+        if pos + 18 <= len(ref_seq):
+            kmer = ref_seq[pos:pos+18].upper()
+            if 'N' not in kmer and len(kmer) == 18:
+                kmers.append((offset, kmer, str(Seq(kmer).reverse_complement())))
+
+    too_variable = []
+    truncated_poor_divergent = []
+    details = {}
+
+    for seq_id in non_matched_ids:
+        matched_primers = []
+        unmatched_primers = []
+        for p_id in primers_dict:
+            if seq_id in primer_matches_set.get(p_id, set()):
+                matched_primers.append(p_id)
+            else:
+                unmatched_primers.append(p_id)
+                
+        # 1. Règle absolue : 0 amorce fixée -> tronqué/pauvre/très divergent
+        if len(matched_primers) == 0:
+            truncated_poor_divergent.append(seq_id)
+            details[seq_id] = {
+                'status': 'truncated_poor_divergent',
+                'matched': [],
+                'unmatched': {p: 'not_found' for p in unmatched_primers}
+            }
+            continue
+            
+        # 2. Si au moins 1 amorce fixée, extraire la région de l'amplicon
+        seq_amp = extract_amplicon_region(
+            seq_id, targets, gapped_targets, ref_seq_id, ref_seq, ref_gapped,
+            amp_start, amp_end, amp_len, is_msa, mapping, blast_results, kmers
+        )
+        
+        # 3. Vérifier la qualité de l'amplicon extrait
+        if seq_amp:
+            n_pct = (seq_amp.count('N') / len(seq_amp)) * 100
+            if n_pct > max_n_pct_diag:
+                # Mauvaise qualité -> classé en truncated/poor/divergent
+                truncated_poor_divergent.append(seq_id)
+                details[seq_id] = {
+                    'status': 'truncated_poor_divergent',
+                    'matched': matched_primers,
+                    'unmatched': {p: 'poor_quality' for p in unmatched_primers}
+                }
+                continue
+                
+        # 4. Si qualité OK (ou région non extraite mais au moins 1 amorce fixée) -> trop variable
+        too_variable.append(seq_id)
+        unmatched_status = {}
+        for p_id in unmatched_primers:
+            primer_seq = primers_dict[p_id]
+            if seq_amp and check_relaxed_primer_match(seq_amp, primer_seq):
+                unmatched_status[p_id] = 'too_many_errors'
+            else:
+                unmatched_status[p_id] = 'not_found'
+                
+        details[seq_id] = {
+            'status': 'too_variable',
+            'matched': matched_primers,
+            'unmatched': unmatched_status
+        }
+
+    return {
+        'too_variable': too_variable,
+        'truncated_poor_divergent': truncated_poor_divergent,
+        'details': details,
+        'ref_amp_len': amp_len,
+        'method': 'Primer Binding + Align Analysis'
+    }
+
+
 
 def seq_to_regex(seq):
     """Convertit une séquence avec codes IUPAC en expression régulière."""
@@ -574,14 +862,18 @@ def main():
     parser.add_argument("-s", "--strict-3prime", type=int, default=3, dest="strict_3prime", help="Taille zone 3' stricte / Strict 3' region size. Def: 3")
     parser.add_argument("--strict-3prime-tolerate", type=int, choices=[0, 1, 2], default=0, help="Niveau de tolérance en zone 3' (0: tout strict, 1: pos 2 tolérée, 2: pos 1 et 2 tolérées). / Tolerance level in the 3' region (0: all strict, 1: pos 2 tolerated, 2: pos 1 and 2 tolerated).")
     parser.add_argument("--strict-intersection", action="store_true", help="Exige que toutes les amorces du fichier matchent la cible. / Requires all primers in the file to match the target.")
-    parser.add_argument("--max-n-pct", type=float, default=5.0, dest="max_n_pct",
-        help="Exclure les séquences dont le pourcentage de N dépasse ce seuil / Exclude sequences with N percentage above this threshold. 0=désactivé/disabled. Def: 5.0")
+    parser.add_argument("--max-n-pct", type=float, default=0, dest="max_n_pct",
+        help="Exclure les séquences dont le pourcentage de N dépasse ce seuil / Exclude sequences with N percentage above this threshold. 0=désactivé/disabled (défaut/default). Def: 0")
     
     # Options de sortie
     parser.add_argument("--summary-only", action="store_true", help="N'affiche que les statistiques / Output only summary statistics.")
     parser.add_argument("--combine", action="store_true", help="Couverture combinatoire 2 à 2 / Calculate 2-by-2 multiplexing coverage.")
     parser.add_argument("--export-seqs", action="store_true", help="Exporte les séquences validées / Export validated sequences per set.")
     parser.add_argument("--pcr", action="store_true", help="Mode PCR : Gère les amorces Forward, Reverse et Sonde / PCR mode: handles Fwd, Rev and Probe primers.")
+    parser.add_argument("--diagnose-nonmatch", action="store_true", dest="diagnose_nonmatch",
+        help="Diagnostique les séquences non-matchées : qualité insuffisante vs vrai non-match. / Diagnose non-matching sequences: poor quality vs true non-match.")
+    parser.add_argument("--diag-n-pct", type=float, default=5.0, dest="diag_n_pct",
+        help="Seuil de %% de N dans l'amplicon pour qualifier une séquence de mauvaise qualité (utilisé avec --diagnose-nonmatch). / N%% threshold in the amplicon to flag a sequence as poor quality (used with --diagnose-nonmatch). Def: 5.0")
     
     # Langue
     parser.add_argument("--lng", type=str, default="en", choices=["en", "fr"], help="Langue du rapport / Report language (en, fr). Def: en")
@@ -634,6 +926,19 @@ def main():
             'pool_tested':        "combinaison(s) de sous-ensembles testée(s)",
             'pool_exhaustive':    "recherche exhaustive",
             'pool_greedy':        "algorithme glouton progressif",
+            'diag_title':         "Diagnostic des séquences non-matchées (méthode : {})",
+            'diag_ref_amp':       "Amplicon de référence : {} nt (séquence de réf : {})",
+            'diag_too_variable':  "🚫 Séquences trop variables (au moins 1 amorce se fixe, divergence réelle)",
+            'diag_truncated_poor_divergent': "❓ Séquences tronquées, de mauvaise qualité ou très divergentes (0 amorce se fixe)",
+            'of_non_matched':     "des non-matchés",
+            'too_variable_list_title': "Liste des séquences trop variables :",
+            'truncated_list_title': "Liste des séquences tronquées, de mauvaise qualité ou très divergentes :",
+            'too_many_errors':    "Trop d'erreurs",
+            'not_found_word':     "Introuvable",
+            'poor_quality_word':  "Mauvaise qualité",
+            'matched_word':       "Amorce(s) fixée(s)",
+            'unmatched_word':     "Non-fixée(s)",
+            'diag_potential_cov': "→ Couverture potentielle si séquences tronquées, de mauvaise qualité ou très divergentes exclues",
         },
         'en': {
             'target_load': "Loading target sequences...",
@@ -678,6 +983,19 @@ def main():
             'pool_tested':        "subset combination(s) tested",
             'pool_exhaustive':    "exhaustive search",
             'pool_greedy':        "progressive greedy algorithm",
+            'diag_title':         "Non-matching sequences diagnosis (method: {})",
+            'diag_ref_amp':       "Reference amplicon: {} nt (reference seq: {})",
+            'diag_too_variable':  "🚫 Too variable sequences (at least 1 primer binds, real divergence)",
+            'diag_truncated_poor_divergent': "❓ Truncated, poor quality or highly divergent (0 primers bind)",
+            'of_non_matched':     "of non-matched",
+            'too_variable_list_title': "List of too variable sequences:",
+            'truncated_list_title': "List of truncated, poor or highly divergent sequences:",
+            'too_many_errors':    "Too many errors",
+            'not_found_word':     "Not found",
+            'poor_quality_word':  "Poor quality",
+            'matched_word':       "Matched primer(s)",
+            'unmatched_word':     "Unmatched",
+            'diag_potential_cov': "→ Potential coverage if truncated, poor quality or highly divergent sequences excluded",
         }
     }
     
@@ -707,6 +1025,8 @@ def main():
             clean_seq = raw_seq.replace('-', '')
             if len(clean_seq) > 100:
                 targets[record.description] = clean_seq   # Sans gaps / Without gaps (for matching)
+        
+        gapped_targets = {record.description: str(record.seq).upper() for record in all_records}
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)
@@ -870,9 +1190,10 @@ def main():
                         names = '+'.join(versions)
                         out.write(f"  \u2192 {txt['type_union_label']} {base_type} ({names}) : {u_pct:.2f}% ({len(union_seqs)}/{effective_targets})\n")
 
-                # ── Intersection brute (toutes amorces individuellement) ───────────────
-                # Raw intersection (all individual primers must match)
-                intersection_matches = set.intersection(*set_matches_list) if set_matches_list else set()
+                # ── Intersection brute (tous les types d'amorces présents matchent) ────
+                # Raw intersection (all present primer types must match, taking the union of variants per type)
+                all_unions = list(type_unions.values())
+                intersection_matches = set.intersection(*all_unions) if all_unions else set()
 
                 # ── Couverture poolée (union par type, intersection des types) ─────────
                 # Pooled coverage (union per type, then intersect across types)
@@ -909,18 +1230,35 @@ def main():
                     sorted_primers = sorted(positions.keys(), key=lambda p: positions[p][0])
 
                     if args.pcr:
-                        # Vérification par type PCR : F < P(s) < R
-                        # PCR type-based order check: F < probe(s) < R
-                        type_seq = [get_base_type(p, is_pcr=True) for p in sorted_primers]
-                        if len(type_seq) >= 2:
-                            first_t, last_t = type_seq[0], type_seq[-1]
-                            middle_t = type_seq[1:-1]
-                            is_correct_order = (
-                                (first_t == 'F' and last_t == 'R' and all(t == 'P' for t in middle_t)) or
-                                (first_t == 'R' and last_t == 'F' and all(t == 'P' for t in middle_t))
-                            )
-                        else:
+                        # Remapper les versions d'amorces PCR vers leur type de base (F, R, P)
+                        # Remap versioned PCR primers to their base type (F, R, P)
+                        base_type_pos = defaultdict(list)
+                        for p, pos in positions.items():
+                            bt = get_base_type(p, is_pcr=True)
+                            base_type_pos[bt].append(pos)
+                        
+                        if 'F' not in base_type_pos or 'R' not in base_type_pos:
                             is_correct_order = False
+                        else:
+                            f_starts = [pos[0] for pos in base_type_pos['F']]
+                            f_ends = [pos[1] for pos in base_type_pos['F']]
+                            r_starts = [pos[0] for pos in base_type_pos['R']]
+                            r_ends = [pos[1] for pos in base_type_pos['R']]
+                            
+                            min_f_start, max_f_end = min(f_starts), max(f_ends)
+                            min_r_start, max_r_end = min(r_starts), max(r_ends)
+                            
+                            if 'P' in base_type_pos:
+                                p_starts = [pos[0] for pos in base_type_pos['P']]
+                                p_ends = [pos[1] for pos in base_type_pos['P']]
+                                
+                                # Sens : F < P < R
+                                is_sense = (min_f_start < min(p_starts)) and (max(p_ends) < max_r_end)
+                                # Anti-sens : R < P < F
+                                is_antisense = (min_r_start < min(p_starts)) and (max(p_ends) < max_f_end)
+                                is_correct_order = is_sense or is_antisense
+                            else:
+                                is_correct_order = (min_f_start < max_r_end) or (min_r_start < max_f_end)
                     else:
                         # LAMP : remapper les versions vers leur type de base pour la vérification d'ordre
                         # LAMP: remap versioned primers to their base type for order check
@@ -966,6 +1304,90 @@ def main():
                 if validation_matches != intersection_matches:
                     out.write(f"{txt['global_base']} : {val_match_pct:.2f}% ({len(validation_matches)}/{effective_targets})\n")
                 out.write(f"{txt['global_valid']} : {valid_match_pct:.2f}% ({len(valid_order_matches)}/{effective_targets})\n")
+
+                # ── Diagnostic des séquences non-matchées (si --diagnose-nonmatch) ──────
+                # Non-matching sequences diagnosis (if --diagnose-nonmatch)
+                if args.diagnose_nonmatch:
+                    all_seq_ids   = set(targets.keys())
+                    non_matched   = list(all_seq_ids - validation_matches)
+                    n_non_matched = len(non_matched)
+                    
+                    if n_non_matched > 0:
+                        # Trouver la ref : séquence avec ordre correct / Find ref: sequence with correct order
+                        ref_id = valid_order_matches[0] if valid_order_matches else None
+                        
+                        diag = diagnose_nonmatching_sequences(
+                            non_matched_ids    = non_matched,
+                            targets            = targets,
+                            gapped_targets     = gapped_targets,
+                            primers_dict       = primers,
+                            primer_positions   = primer_positions,
+                            set_id             = set_id,
+                            valid_order_matches= valid_order_matches,
+                            is_pcr             = args.pcr,
+                            max_n_pct_diag     = args.diag_n_pct,
+                            primer_matches_set = primer_matches[set_id]
+                        )
+                        
+                        out.write(f"\n{'─'*40}\n")
+                        out.write(f"{txt['diag_title'].format(diag.get('method', 'Primer Binding Analysis'))} ({n_non_matched} {txt['seqs_word']}) :\n")
+                        
+                        # Ligne amplicon de référence si disponible
+                        # Reference amplicon line if available
+                        if diag['ref_amp_len'] > 0 and ref_id:
+                            out.write(f"  {txt['diag_ref_amp'].format(diag['ref_amp_len'], ref_id[:60])}\n")
+                        
+                        # Afficher les catégories de diagnostic basées sur le nombre de liaisons d'amorces
+                        # Display diagnostic categories based on primer binding counts
+                        tv  = diag['too_variable']
+                        tpd = diag['truncated_poor_divergent']
+                        
+                        tv_pct  = (len(tv) / n_non_matched) * 100 if n_non_matched > 0 else 0
+                        tpd_pct = (len(tpd) / n_non_matched) * 100 if n_non_matched > 0 else 0
+                        
+                        out.write(f"  {txt['diag_too_variable']} : {len(tv)} ({tv_pct:.1f}% {txt['of_non_matched']})\n")
+                        out.write(f"  {txt['diag_truncated_poor_divergent']} : {len(tpd)} ({tpd_pct:.1f}% {txt['of_non_matched']})\n")
+                        
+                        if len(tpd) > 0:
+                            corrected_total = effective_targets - len(tpd)
+                            if corrected_total > 0:
+                                potential_pct = (len(valid_order_matches) / corrected_total) * 100
+                                out.write(f"  {txt['diag_potential_cov']} : {potential_pct:.2f}% ({len(valid_order_matches)}/{corrected_total})\n")
+                        
+                        # Si l'option --summary-only n'est pas active, lister les IDs détaillés pour chaque catégorie
+                        # If --summary-only is not active, list detailed IDs for each category
+                        if not args.summary_only:
+                            details = diag['details']
+                            if tv:
+                                out.write(f"\n  {txt['too_variable_list_title']}\n")
+                                for seq_id in sorted(tv):
+                                    det = details[seq_id]
+                                    matched_str = ", ".join(det['matched']) if det['matched'] else "-"
+                                    unmatched_parts = []
+                                    for p_id, status in sorted(det['unmatched'].items()):
+                                        lbl = txt.get(status + '_word', status) if status in ['not_found', 'poor_quality'] else txt.get('too_many_errors', 'Too many errors')
+                                        unmatched_parts.append(f"{p_id} ({lbl})")
+                                    unmatched_str = ", ".join(unmatched_parts) if unmatched_parts else "-"
+                                    out.write(f"    - {seq_id}\n")
+                                    out.write(f"      * {txt['matched_word']} : {matched_str}\n")
+                                    out.write(f"      * {txt['unmatched_word']} : {unmatched_str}\n")
+                            if tpd:
+                                out.write(f"\n  {txt['truncated_list_title']}\n")
+                                for seq_id in sorted(tpd):
+                                    det = details[seq_id]
+                                    matched_str = ", ".join(det['matched']) if det['matched'] else "-"
+                                    unmatched_parts = []
+                                    for p_id, status in sorted(det['unmatched'].items()):
+                                        lbl = txt.get(status + '_word', status) if status in ['not_found', 'poor_quality'] else txt.get('too_many_errors', 'Too many errors')
+                                        unmatched_parts.append(f"{p_id} ({lbl})")
+                                    unmatched_str = ", ".join(unmatched_parts) if unmatched_parts else "-"
+                                    out.write(f"    - {seq_id}\n")
+                                    if det['matched']:
+                                        out.write(f"      * {txt['matched_word']} : {matched_str}\n")
+                                    out.write(f"      * {txt['unmatched_word']} : {unmatched_str}\n")
+                                    
+                        out.write(f"{'─'*40}\n")
+
 
                 # ── Analyse combinatoire (uniquement si multi-versions) ───────────────
                 # Combinatorial analysis (only if multi-version types exist)
