@@ -282,7 +282,7 @@ def inject_gaps(primer_seq, gapped_ref_sub):
     return result
 
 def align_one_primer(primer_id, primer_seq, ref_ungapped_str, ref_gapped_str,
-                     ungapped_to_gapped, msa_len, max_errors):
+                     ungapped_to_gapped, msa_len, max_errors, silent=False):
     """
     Aligne une seule amorce sur la séquence de référence.
     Aligns a single primer against the reference sequence.
@@ -330,7 +330,8 @@ def align_one_primer(primer_id, primer_seq, ref_ungapped_str, ref_gapped_str,
     strand  = "Forward" if best_is_fwd else "Reverse"
     desc    = f"Errors={errors} Pos={start_gapped+1}-{end_gapped} Strand={strand}"
 
-    print(f"  [+] Trouvé : {out_id} (Erreurs: {errors}, Position MSA: {start_gapped+1}-{end_gapped})")
+    if not silent:
+        tqdm.write(f"  [+] Trouvé : {out_id} (Erreurs: {errors}, Position MSA: {start_gapped+1}-{end_gapped})")
     return SeqRecord(Seq(padded_seq), id=out_id, description=desc)
 
 def main():
@@ -440,6 +441,18 @@ def main():
         print()
 
     # ─────────────────────────────────────────────────────
+    # Pré-calcul des mappages des autres séquences cibles pour le fallback
+    # Precompute mappings of other target sequences for fallback search
+    # ─────────────────────────────────────────────────────
+    targets_mappings = []
+    for rec in targets:
+        if rec.id == ref_record.id:
+            continue
+        rec_gapped = str(rec.seq).upper()
+        rec_ungapped, rec_map = get_ungapped_mapping(rec_gapped)
+        targets_mappings.append((rec.id, rec_ungapped, rec_gapped, rec_map))
+
+    # ─────────────────────────────────────────────────────
     # Alignement de chaque amorce avec barre de progression
     # Align each primer with a progress bar
     # ─────────────────────────────────────────────────────
@@ -460,7 +473,28 @@ def main():
         if record:
             out_records.append(record)
         else:
-            tqdm.write(f"  [-] Non trouvé / Not found : {primer_id}")
+            # Fallback : recherche sur toutes les autres séquences cibles du MSA
+            # Fallback: search across all other target sequences in the MSA
+            found_alt = False
+            for alt_id, alt_ungapped, alt_gapped, alt_map in targets_mappings:
+                record = align_one_primer(
+                    primer_id, primer_seq,
+                    alt_ungapped, alt_gapped,
+                    alt_map, msa_len,
+                    args.errors,
+                    silent=True
+                )
+                if record:
+                    out_records.append(record)
+                    record.description += f" AltRef={alt_id}"
+                    pos_info = [p for p in record.description.split() if p.startswith("Pos=")][0].split("=")[1]
+                    err_info = [p for p in record.description.split() if p.startswith("Errors=")][0].split("=")[1]
+                    tqdm.write(f"  [+] Trouvé (via alt ref: {alt_id[:30]}) : {record.id} (Erreurs: {err_info}, Position MSA: {pos_info})")
+                    found_alt = True
+                    break
+            
+            if not found_alt:
+                tqdm.write(f"  [-] Non trouvé dans toute la base / Not found in entire database : {primer_id}")
 
     # Écriture du fichier de sortie / Write output file
     try:
