@@ -281,6 +281,16 @@ def inject_gaps(primer_seq, gapped_ref_sub):
                 result += '-'
     return result
 
+def get_expected_strand(primer_id):
+    pid = primer_id.upper()
+    for tag in ['_RP', '_R1', '_R2', '_R3', '_BIP', '_B3', '_R_']:
+        if tag in pid or pid.endswith('RP') or pid.endswith('R1') or pid.endswith('R2') or pid.endswith('_R'):
+            return 'REV'
+    for tag in ['_FP', '_F1', '_F2', '_F3', '_FIP', '_F_']:
+        if tag in pid or pid.endswith('FP') or pid.endswith('F1') or pid.endswith('F2') or pid.endswith('_F'):
+            return 'FWD'
+    return 'ANY'
+
 def align_one_primer(primer_id, primer_seq, ref_ungapped_str, ref_gapped_str,
                      ungapped_to_gapped, msa_len, max_errors, silent=False):
     """
@@ -288,12 +298,14 @@ def align_one_primer(primer_id, primer_seq, ref_ungapped_str, ref_gapped_str,
     Aligns a single primer against the reference sequence.
     Retourne / Returns : SeqRecord prêt à être écrit, ou None si non trouvé.
     """
+    expected = get_expected_strand(primer_id)
+
     # Recherche brin sens / Forward strand search
-    match_fwd = find_best_match(ref_ungapped_str, primer_seq, max_errors)
+    match_fwd = find_best_match(ref_ungapped_str, primer_seq, max_errors) if expected in ['FWD', 'ANY'] else None
 
     # Recherche brin antisens (reverse complement) / Reverse strand search
     primer_rc_str = str(Seq(primer_seq).reverse_complement())
-    match_rev = find_best_match(ref_ungapped_str, primer_rc_str, max_errors)
+    match_rev = find_best_match(ref_ungapped_str, primer_rc_str, max_errors) if expected in ['REV', 'ANY'] else None
 
     best_is_fwd = True
     best_match = None
