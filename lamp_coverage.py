@@ -8,6 +8,8 @@ import regex
 from collections import defaultdict, Counter
 from Bio import SeqIO
 from Bio.Seq import Seq
+import concurrent.futures
+import math
 
 # Import optionnel de tqdm pour les barres de progression / Optional tqdm import for progress bars
 try:
@@ -853,6 +855,34 @@ def auto_split_fip_bip(primer_sets, targets, txt):
                 else:
                     print(txt['split_fail'].format(set_id, combo_name))
 
+def process_primer_matches_chunk(args):
+    """
+    Fonction worker pour traiter un sous-ensemble (chunk) de séquences cibles
+    contre tous les sets d'amorces en parallèle.
+    """
+    targets_chunk, primer_sets, errors, strict_3prime, strict_3prime_tolerate = args
+    
+    local_primer_matches = {}
+    local_primer_positions = {}
+    
+    for seq_id, seq in targets_chunk:
+        for set_id, primers in primer_sets.items():
+            if set_id not in local_primer_matches:
+                local_primer_matches[set_id] = {}
+                local_primer_positions[set_id] = {}
+            if seq_id not in local_primer_positions[set_id]:
+                local_primer_positions[set_id][seq_id] = {}
+                
+            for primer_id, primer_seq in primers.items():
+                pos = primer_matches_sequence(seq, primer_seq, errors, strict_3prime, strict_3prime_tolerate)
+                if pos:
+                    if primer_id not in local_primer_matches[set_id]:
+                        local_primer_matches[set_id][primer_id] = set()
+                    local_primer_matches[set_id][primer_id].add(seq_id)
+                    local_primer_positions[set_id][seq_id][primer_id] = pos
+                    
+    return local_primer_matches, local_primer_positions, len(targets_chunk) * sum(len(p) for p in primer_sets.values())
+
 def main():
     parser = argparse.ArgumentParser(description="Évalue la couverture et l'ordre des amorces LAMP / Evaluate LAMP primer coverage and structural order.")
     parser.add_argument("-t", "--target", required=True, help="Fichier FASTA cible / Target FASTA file.")
@@ -1093,21 +1123,37 @@ def main():
     bad_seqs_per_set = defaultdict(set)  # inutilisé ici mais conservé pour compatibilité / kept for compatibility
 
     # Boucle principale d'analyse / Main analysis loop
-    total_steps = len(primer_sets) * len(targets)
+    total_steps = len(targets) * sum(len(p) for p in primer_sets.values())
     bar_label = "🔬 Analyse" if args.lng == 'fr' else "🔬 Analysing"
 
+    workers = min(8, max(1, (os.cpu_count() or 4) - 2))
+    print(f"\n🚀 Utilisation de {workers} processus pour l'analyse / Using {workers} processes for analysis\n")
+
+    targets_items = list(targets.items())
+    chunk_size = max(1, math.ceil(len(targets_items) / (workers * 4)))
+    
+    chunks = []
+    for i in range(0, len(targets_items), chunk_size):
+        chunk = targets_items[i:i+chunk_size]
+        chunks.append((chunk, primer_sets, args.errors, args.strict_3prime, args.strict_3prime_tolerate))
+        
     with tqdm(total=total_steps, desc=bar_label, unit=" seq", colour="green") as pbar:
-        for set_id, primers in primer_sets.items():
-            for seq_id, seq in targets.items():
-                for primer_id, primer_seq in primers.items():
-                    pos = primer_matches_sequence(seq, primer_seq, args.errors, args.strict_3prime, args.strict_3prime_tolerate)
-                    if pos:
-                        primer_matches[set_id][primer_id].add(seq_id)
-                        primer_positions[set_id][seq_id][primer_id] = pos
-                pbar.update(1)
-                pbar.set_postfix_str(f"Set {set_id}")
-
-
+        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(process_primer_matches_chunk, chunk) for chunk in chunks]
+            
+            for future in concurrent.futures.as_completed(futures):
+                local_matches, local_positions, steps_done = future.result()
+                
+                # Fusionner les résultats / Merge results
+                for set_id, primers_dict in local_matches.items():
+                    for primer_id, seq_ids in primers_dict.items():
+                        primer_matches[set_id][primer_id].update(seq_ids)
+                        
+                for set_id, seq_dict in local_positions.items():
+                    for seq_id, primer_dict in seq_dict.items():
+                        primer_positions[set_id][seq_id].update(primer_dict)
+                        
+                pbar.update(steps_done)
 
     print(txt['report_gen'])
     

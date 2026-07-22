@@ -17,6 +17,10 @@ except ImportError:
         if desc:
             print(f"{desc}...")
         return iterable
+    tqdm.write = print
+
+import concurrent.futures
+import os
 
 # Dictionnaire IUPAC vers expression régulière
 # IUPAC dictionary to regular expression / Dictionnaire IUPAC vers expression régulière
@@ -346,6 +350,43 @@ def align_one_primer(primer_id, primer_seq, ref_ungapped_str, ref_gapped_str,
         tqdm.write(f"  [+] Trouvé : {out_id} (Erreurs: {errors}, Position MSA: {start_gapped+1}-{end_gapped})")
     return SeqRecord(Seq(padded_seq), id=out_id, description=desc)
 
+def process_primer_task(args):
+    """
+    Fonction exécutée par chaque processus pour aligner une amorce.
+    """
+    primer_id, primer_seq, ref_ungapped_str, ref_gapped_str, ungapped_to_gapped, msa_len, max_errors, targets_mappings = args
+    
+    record = align_one_primer(
+        primer_id, primer_seq,
+        ref_ungapped_str, ref_gapped_str,
+        ungapped_to_gapped, msa_len,
+        max_errors, silent=True
+    )
+    
+    if record:
+        pos_info = [p for p in record.description.split() if p.startswith("Pos=")][0].split("=")[1]
+        err_info = [p for p in record.description.split() if p.startswith("Errors=")][0].split("=")[1]
+        msg = f"  [+] Trouvé : {record.id} (Erreurs: {err_info}, Position MSA: {pos_info})"
+        return record, msg
+
+    # Fallback : recherche sur toutes les autres séquences cibles du MSA
+    for alt_id, alt_ungapped, alt_gapped, alt_map in targets_mappings:
+        record = align_one_primer(
+            primer_id, primer_seq,
+            alt_ungapped, alt_gapped,
+            alt_map, msa_len,
+            max_errors,
+            silent=True
+        )
+        if record:
+            record.description += f" AltRef={alt_id}"
+            pos_info = [p for p in record.description.split() if p.startswith("Pos=")][0].split("=")[1]
+            err_info = [p for p in record.description.split() if p.startswith("Errors=")][0].split("=")[1]
+            msg = f"  [+] Trouvé (via alt ref: {alt_id[:30]}) : {record.id} (Erreurs: {err_info}, Position MSA: {pos_info})"
+            return record, msg
+            
+    return None, f"  [-] Non trouvé dans toute la base / Not found in entire database : {primer_id}"
+
 def main():
     parser = argparse.ArgumentParser(
         description="Aligne des amorces (dont FIP/BIP) sur un MSA ou un génome simple. / "
@@ -465,48 +506,31 @@ def main():
         targets_mappings.append((rec.id, rec_ungapped, rec_gapped, rec_map))
 
     # ─────────────────────────────────────────────────────
-    # Alignement de chaque amorce avec barre de progression
-    # Align each primer with a progress bar
+    # Alignement de chaque amorce avec ProcessPoolExecutor
+    # Align each primer using ProcessPoolExecutor
     # ─────────────────────────────────────────────────────
     out_records = list(targets)  # Toutes les séquences cibles en premier / All target seqs first
 
-    for primer_id, primer_seq in tqdm(
-        primers_dict.items(),
-        desc="🧬 Alignement amorces / Aligning primers",
-        unit=" primer",
-        colour="magenta"
-    ):
-        record = align_one_primer(
-            primer_id, primer_seq,
-            ref_ungapped_str, ref_gapped_str,
-            ungapped_to_gapped, msa_len,
-            args.errors
-        )
-        if record:
-            out_records.append(record)
-        else:
-            # Fallback : recherche sur toutes les autres séquences cibles du MSA
-            # Fallback: search across all other target sequences in the MSA
-            found_alt = False
-            for alt_id, alt_ungapped, alt_gapped, alt_map in targets_mappings:
-                record = align_one_primer(
-                    primer_id, primer_seq,
-                    alt_ungapped, alt_gapped,
-                    alt_map, msa_len,
-                    args.errors,
-                    silent=True
-                )
-                if record:
-                    out_records.append(record)
-                    record.description += f" AltRef={alt_id}"
-                    pos_info = [p for p in record.description.split() if p.startswith("Pos=")][0].split("=")[1]
-                    err_info = [p for p in record.description.split() if p.startswith("Errors=")][0].split("=")[1]
-                    tqdm.write(f"  [+] Trouvé (via alt ref: {alt_id[:30]}) : {record.id} (Erreurs: {err_info}, Position MSA: {pos_info})")
-                    found_alt = True
-                    break
-            
-            if not found_alt:
-                tqdm.write(f"  [-] Non trouvé dans toute la base / Not found in entire database : {primer_id}")
+    workers = min(8, max(1, (os.cpu_count() or 4) - 2))
+    print(f"\n🚀 Utilisation de {workers} processus pour l'alignement / Using {workers} processes for alignment")
+
+    tasks = []
+    for primer_id, primer_seq in primers_dict.items():
+        tasks.append((primer_id, primer_seq, ref_ungapped_str, ref_gapped_str, ungapped_to_gapped, msa_len, args.errors, targets_mappings))
+
+    with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(process_primer_task, task): task[0] for task in tasks}
+        for future in tqdm(
+            concurrent.futures.as_completed(futures),
+            total=len(futures),
+            desc="🧬 Alignement amorces / Aligning primers",
+            unit=" primer",
+            colour="magenta"
+        ):
+            record, msg = future.result()
+            if record:
+                out_records.append(record)
+            tqdm.write(msg)
 
     # Écriture du fichier de sortie / Write output file
     try:
