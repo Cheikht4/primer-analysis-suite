@@ -1130,7 +1130,16 @@ def main():
     print(f"\n🚀 Utilisation de {workers} processus pour l'analyse / Using {workers} processes for analysis\n")
 
     targets_items = list(targets.items())
-    chunk_size = max(1, math.ceil(len(targets_items) / (workers * 4)))
+    
+    total_primers = sum(len(p) for p in primer_sets.values())
+    
+    # Calcul dynamique de la taille de chunk pour une barre de progression fluide
+    # On veut suffisamment de chunks pour alimenter les workers, mais pas trop gros 
+    # pour que l'affichage se mette à jour fréquemment (idéalement ~1000 comparaisons par chunk max).
+    base_chunk = math.ceil(len(targets_items) / (workers * 4))
+    max_chunk = max(1, 1000 // (total_primers if total_primers > 0 else 1))
+    chunk_size = min(base_chunk, max_chunk)
+    chunk_size = max(1, chunk_size)
     
     chunks = []
     for i in range(0, len(targets_items), chunk_size):
