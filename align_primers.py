@@ -350,11 +350,17 @@ def align_one_primer(primer_id, primer_seq, ref_ungapped_str, ref_gapped_str,
         tqdm.write(f"  [+] Trouvé : {out_id} (Erreurs: {errors}, Position MSA: {start_gapped+1}-{end_gapped})")
     return SeqRecord(Seq(padded_seq), id=out_id, description=desc)
 
+global_targets_mappings = []
+
+def init_worker(mappings):
+    global global_targets_mappings
+    global_targets_mappings = mappings
+
 def process_primer_task(args):
     """
     Fonction exécutée par chaque processus pour aligner une amorce.
     """
-    primer_id, primer_seq, ref_ungapped_str, ref_gapped_str, ungapped_to_gapped, msa_len, max_errors, targets_mappings = args
+    primer_id, primer_seq, ref_ungapped_str, ref_gapped_str, ungapped_to_gapped, msa_len, max_errors = args
     
     record = align_one_primer(
         primer_id, primer_seq,
@@ -370,7 +376,7 @@ def process_primer_task(args):
         return record, msg
 
     # Fallback : recherche sur toutes les autres séquences cibles du MSA
-    for alt_id, alt_ungapped, alt_gapped, alt_map in targets_mappings:
+    for alt_id, alt_ungapped, alt_gapped, alt_map in global_targets_mappings:
         record = align_one_primer(
             primer_id, primer_seq,
             alt_ungapped, alt_gapped,
@@ -516,9 +522,9 @@ def main():
 
     tasks = []
     for primer_id, primer_seq in primers_dict.items():
-        tasks.append((primer_id, primer_seq, ref_ungapped_str, ref_gapped_str, ungapped_to_gapped, msa_len, args.errors, targets_mappings))
+        tasks.append((primer_id, primer_seq, ref_ungapped_str, ref_gapped_str, ungapped_to_gapped, msa_len, args.errors))
 
-    with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=workers, initializer=init_worker, initargs=(targets_mappings,)) as executor:
         futures = {executor.submit(process_primer_task, task): task[0] for task in tasks}
         for future in tqdm(
             concurrent.futures.as_completed(futures),

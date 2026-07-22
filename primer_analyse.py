@@ -68,7 +68,7 @@ def main():
     
     aligned_fasta = None
     primers_fasta = None
-    report_file = None
+    base_dir = os.path.dirname(os.path.abspath(__file__))
     
     # 1. Alignement des amorces / Align primers
     if "align" in args.steps:
@@ -77,7 +77,7 @@ def main():
         print(f"🛠️  Étape 1 : Alignement des amorces (align_primers.py)")
         print("==================================================")
         cmd_align = [
-            sys.executable, "align_primers.py",
+            sys.executable, os.path.join(base_dir, "align_primers.py"),
             "-t", args.target,
             "-p", args.primers,
             "-o", aligned_fasta,
@@ -99,7 +99,7 @@ def main():
             SeqIO.write(primers_records, primers_fasta, "fasta")
             
             input_data = f"{args.lng}\n{primers_fasta}\ny\n"
-            cmd_dimers = [sys.executable, "analyze_dimers_v2.py"]
+            cmd_dimers = [sys.executable, os.path.join(base_dir, "analyze_dimers_v2.py")]
             subprocess.run(cmd_dimers, input=input_data, text=True)
             
         except Exception as e:
@@ -114,7 +114,7 @@ def main():
         report_file = f"{args.output_prefix}_coverage_report.txt"
         
         cmd_lamp = [
-            sys.executable, "lamp_coverage.py",
+            sys.executable, os.path.join(base_dir, "lamp_coverage.py"),
             "-t", args.target,
             "-p", args.primers,
             "-o", report_file,
