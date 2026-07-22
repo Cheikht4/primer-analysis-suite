@@ -1526,10 +1526,17 @@ def main():
                 out.write(f"{txt['combine_subtitle']}\n\n")
                 
                 set_keys = list(primer_sets.keys())
+                combine_results = []
                 for s1, s2 in itertools.combinations(set_keys, 2):
                     union_set = valid_sequences_per_set[s1] | valid_sequences_per_set[s2]
                     combine_pct = (len(union_set) / total_targets) * 100 if total_targets > 0 else 0
-                    out.write(f"  - Set {s1} + Set {s2} : {combine_pct:.2f}% ({len(union_set)}/{total_targets})\n")
+                    combine_results.append((len(union_set), combine_pct, s1, s2))
+                
+                # Tri décroissant selon le nombre de séquences trouvées
+                combine_results.sort(key=lambda x: x[0], reverse=True)
+                
+                for union_len, combine_pct, s1, s2 in combine_results:
+                    out.write(f"  - Set {s1} + Set {s2} : {combine_pct:.2f}% ({union_len}/{total_targets})\n")
                 out.write("\n" + "="*40 + "\n\n")
 
         print(txt['done'].format(args.output))
