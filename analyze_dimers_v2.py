@@ -448,10 +448,12 @@ def analyze_dimer(seq1: str, seq2: str, name1: str, name2: str,
 
     path_arg = f' -path "{config_path}/"' if config_path else ''
 
+    # Reaction temperature set to 60°C (standard for LAMP/isothermal amplification)
+    # Température de réaction fixée à 60°C (standard pour l'amplification isotherme/LAMP)
     if mode == 'HAIRPIN':
-        cmd = f'"{ntthal_path}" -s1 {seq1} -a HAIRPIN -t 37{path_arg}'
+        cmd = f'"{ntthal_path}" -s1 {seq1} -a HAIRPIN -t 60{path_arg}'
     else:
-        cmd = f'"{ntthal_path}" -s1 {seq1} -s2 {seq2} -a ANY -t 37{path_arg}'
+        cmd = f'"{ntthal_path}" -s1 {seq1} -s2 {seq2} -a ANY -t 60{path_arg}'
 
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
 
