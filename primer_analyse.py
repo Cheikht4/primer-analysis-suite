@@ -83,6 +83,8 @@ def main():
             "-o", aligned_fasta,
             "-e", str(args.errors)
         ]
+        if args.pcr:
+            cmd_align.append("--pcr")
         subprocess.run(cmd_align)
         print()
     

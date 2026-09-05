@@ -132,9 +132,9 @@ def auto_split_fip_bip(primers_dict, ref_ungapped_str, max_errors=2):
         for allowed_err in [0, 1, 2]:
             if found_split:
                 break
-            # Essaie plusieurs longueurs de linker (0 = pas de linker, puis 4, 1, 2…9 nt)
-            # Try different linker lengths (0 = no linker, then 4, 1, 2…9 nt)
-            for linker_len in [0, 4, 1, 2, 3, 5, 6, 7, 8, 9]:
+            # Essaie l'absence de linker (0), puis les linkers biologiquement valides (4 à 9 nt)
+            # Try no linker (0), then biologically valid linkers (4 to 9 nt)
+            for linker_len in [0, 4, 5, 6, 7, 8, 9]:
                 if found_split:
                     break
 
@@ -176,14 +176,14 @@ def auto_split_fip_bip(primers_dict, ref_ungapped_str, max_errors=2):
 
                     if combo_name == 'FIP':
                         # F1c = reverse complement de part1, F2 = part2
-                        result['F1c'] = str(Seq(part1).reverse_complement())
+                        result['F1'] = str(Seq(part1).reverse_complement())
                         result['F2']  = part2
-                        print(f"  [FIP split] F1c={result['F1c']} | F2={result['F2']} (linker {lk} nt)")
+                        print(f"  [FIP split] F1={result['F1']} | F2={result['F2']} (linker {lk} nt)")
                     else:
                         # B1c = reverse complement de part1, B2 = part2
-                        result['B1c'] = str(Seq(part1).reverse_complement())
+                        result['B1'] = str(Seq(part1).reverse_complement())
                         result['B2']  = part2
-                        print(f"  [BIP split] B1c={result['B1c']} | B2={result['B2']} (linker {lk} nt)")
+                        print(f"  [BIP split] B1={result['B1']} | B2={result['B2']} (linker {lk} nt)")
 
                     del result[combo_name]
                     found_split = True
@@ -199,13 +199,13 @@ def auto_split_fip_bip(primers_dict, ref_ungapped_str, max_errors=2):
                 part2 = seq_combo[linker_start + 4:]
 
                 if combo_name == 'FIP':
-                    result['F1c'] = str(Seq(part1).reverse_complement())
+                    result['F1'] = str(Seq(part1).reverse_complement())
                     result['F2']  = part2
-                    print(f"  [FIP split heuristique] F1c={result['F1c']} | F2={result['F2']}")
+                    print(f"  [FIP split heuristique] F1={result['F1']} | F2={result['F2']}")
                 else:
-                    result['B1c'] = str(Seq(part1).reverse_complement())
+                    result['B1'] = str(Seq(part1).reverse_complement())
                     result['B2']  = part2
-                    print(f"  [BIP split heuristique] B1c={result['B1c']} | B2={result['B2']}")
+                    print(f"  [BIP split heuristique] B1={result['B1']} | B2={result['B2']}")
 
                 del result[combo_name]
                 found_split = True
@@ -285,13 +285,113 @@ def inject_gaps(primer_seq, gapped_ref_sub):
                 result += '-'
     return result
 
+def parse_primer_name(name, is_pcr=False):
+    """
+    Décompose le nom d'une amorce en (set_id, primer_type, version).
+    Splits primer name into (set_id, primer_type, version).
+    Exemples:
+      'DENV1_F3' -> ('DENV1', 'F3', '')
+      'DENV1_F1c' -> ('DENV1', 'F1', '')
+      'DENV1_LoopF' -> ('DENV1', 'LOOPF', '')
+      'SetA_F3_2' -> ('SetA', 'F3', '2')
+      'FP' -> ('Default', 'F', '')
+    """
+    if '_' in name:
+        parts = name.rsplit('_', 1)
+        set_id = parts[0]
+        primer_type = parts[1]
+        version = ""
+        # Si le dernier segment est un chiffre, c'est un numéro de version
+        # If the last segment is digits, it's a version number
+        if primer_type.isdigit():
+            inner = set_id.rsplit('_', 1)
+            if len(inner) == 2:
+                version = primer_type
+                set_id = inner[0]
+                primer_type = inner[1]
+    else:
+        set_id = "Default"
+        primer_type = name
+        version = ""
+
+    # Normalisation des alias / Alias normalization
+    pt_upper = primer_type.upper()
+    if is_pcr:
+        alias_map = {
+            'FWD': 'F', 'FORWARD': 'F', 'FP': 'F', 'F3': 'F',
+            'REV': 'R', 'REVERSE': 'R', 'RP': 'R', 'B3': 'R',
+            'PROBE': 'P', 'SONDE': 'P'
+        }
+    else:
+        alias_map = {
+            'BLP': 'BLOOP', 'FLP': 'FLOOP',
+            'LOOPF': 'FLOOP', 'LOOPB': 'BLOOP',
+            'LF': 'FLOOP', 'LB': 'BLOOP',
+            'F1C': 'F1', 'B1C': 'B1',
+            'F3': 'F3', 'F2': 'F2', 'F1': 'F1',
+            'B1': 'B1', 'B2': 'B2', 'B3': 'B3'
+        }
+
+    resolved = alias_map.get(pt_upper)
+    if resolved is None:
+        for key in sorted(alias_map.keys(), key=len, reverse=True):
+            if pt_upper.startswith(key):
+                resolved = alias_map[key]
+                break
+    if resolved is None:
+        stripped = re.sub(r'[^A-Z0-9]+$', '', pt_upper)
+        resolved = alias_map.get(stripped)
+    if resolved is None:
+        for key in sorted(alias_map.keys(), key=len, reverse=True):
+            if pt_upper.endswith(key):
+                resolved = alias_map[key]
+                break
+
+    norm_type = resolved if resolved is not None else pt_upper
+    return set_id, norm_type, version
+
+def get_primer_sort_key(record_id, is_pcr=False):
+    """
+    Retourne une clé de tri pour ordonner les amorces par Set puis par ordre biologique.
+    Returns a sort key to order primers by Set then by biological order.
+    
+    Ordre LAMP : F3 -> F2 -> LoopF -> F1 -> B1 -> LoopB -> B2 -> B3
+    Ordre PCR  : F -> P -> R
+    """
+    # Retirer le suffixe '+c' éventuel de record.id
+    # Strip optional '+c' suffix from record.id
+    clean_id = record_id[:-2] if record_id.endswith('+c') else record_id
+    set_id, norm_type, version = parse_primer_name(clean_id, is_pcr=is_pcr)
+
+    if is_pcr:
+        order_dict = {
+            'F': 1,
+            'P': 2,
+            'R': 3
+        }
+    else:
+        order_dict = {
+            'F3': 1,
+            'F2': 2,
+            'FLOOP': 3,
+            'F1': 4,
+            'B1': 5,
+            'BLOOP': 6,
+            'B2': 7,
+            'B3': 8
+        }
+
+    rank = order_dict.get(norm_type, 99)
+    v_rank = int(version) if version.isdigit() else 0
+    return (set_id.upper(), rank, v_rank, clean_id)
+
 def get_expected_strand(primer_id):
     pid = primer_id.upper()
-    for tag in ['_RP', '_R1', '_R2', '_R3', '_BIP', '_B3', '_R_']:
-        if tag in pid or pid.endswith('RP') or pid.endswith('R1') or pid.endswith('R2') or pid.endswith('_R'):
+    for tag in ['_RP', '_R1', '_R2', '_R3', '_BIP', '_B3', '_R_', '_B2', '_B1', '_BLOOP', '_LB']:
+        if tag in pid or pid.endswith('RP') or pid.endswith('R1') or pid.endswith('R2') or pid.endswith('_R') or pid.endswith('B3') or pid.endswith('B2') or pid.endswith('B1') or pid.endswith('BLOOP') or pid.endswith('LB'):
             return 'REV'
-    for tag in ['_FP', '_F1', '_F2', '_F3', '_FIP', '_F_']:
-        if tag in pid or pid.endswith('FP') or pid.endswith('F1') or pid.endswith('F2') or pid.endswith('_F'):
+    for tag in ['_FP', '_F1', '_F2', '_F3', '_FIP', '_F_', '_FLOOP', '_LF']:
+        if tag in pid or pid.endswith('FP') or pid.endswith('F1') or pid.endswith('F2') or pid.endswith('_F') or pid.endswith('F3') or pid.endswith('FLOOP') or pid.endswith('LF'):
             return 'FWD'
     return 'ANY'
 
@@ -405,6 +505,8 @@ def main():
                         help="Fichier FASTA de sortie / Output FASTA file")
     parser.add_argument("-e", "--errors",  type=int, default=2,
                         help="Nombre max d'erreurs tolérées / Max errors tolerated. Défaut/Default: 2")
+    parser.add_argument("--pcr", action="store_true",
+                        help="Mode PCR (trie par F -> P -> R au lieu de LAMP F3->F2->LoopF->F1->B1->LoopB->B2->B3) / PCR mode")
 
     args = parser.parse_args()
 
@@ -515,7 +617,7 @@ def main():
     # Alignement de chaque amorce avec ProcessPoolExecutor
     # Align each primer using ProcessPoolExecutor
     # ─────────────────────────────────────────────────────
-    out_records = list(targets)  # Toutes les séquences cibles en premier / All target seqs first
+    aligned_primers_records = []
 
     workers = min(8, max(1, (os.cpu_count() or 4) - 2))
     print(f"\n🚀 Utilisation de {workers} processus pour l'alignement / Using {workers} processes for alignment")
@@ -535,8 +637,20 @@ def main():
         ):
             record, msg = future.result()
             if record:
-                out_records.append(record)
+                aligned_primers_records.append(record)
             tqdm.write(msg)
+
+    # ─────────────────────────────────────────────────────
+    # Tri des amorces : Regroupement strict par Set et ordre standard
+    # Sort primers: Strict grouping by Set and standard biological order
+    # (LAMP: F3 -> F2 -> LoopF -> F1 -> B1 -> LoopB -> B2 -> B3)
+    # (PCR : F -> P -> R)
+    # ─────────────────────────────────────────────────────
+    aligned_primers_records.sort(key=lambda rec: get_primer_sort_key(rec.id, is_pcr=args.pcr))
+
+    # Assemblage final : Séquences cibles d'abord, puis amorces triées par set
+    # Final assembly: Target sequences first, then primers sorted by set
+    out_records = list(targets) + aligned_primers_records
 
     # Écriture du fichier de sortie / Write output file
     try:
